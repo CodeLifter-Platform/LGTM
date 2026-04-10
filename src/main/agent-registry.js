@@ -17,8 +17,8 @@ const AGENTS = [
     name: 'Claude Code',
     cli: 'claude',
     models: [
-      { id: 'opus',   label: 'Claude Opus 4' },
-      { id: 'sonnet', label: 'Claude Sonnet 4' },
+      { id: 'claude-opus-4-6',   label: 'Claude Opus 4.6' },
+      { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
     ],
     buildCmd: (prompt, model) => {
       const args = ['--print', '--prompt', prompt];
