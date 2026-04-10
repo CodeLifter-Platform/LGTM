@@ -1,0 +1,55 @@
+{
+  "name": "lgtm",
+  "version": "1.0.0",
+  "description": "LGTM — Azure DevOps PR reviewer powered by Claude Code",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win",
+    "build:all": "electron-builder --mac --win",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "build": {
+    "appId": "com.lgtm.app",
+    "productName": "LGTM",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "resources/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "resources/icon.icns",
+      "target": ["dmg", "zip"],
+      "hardenedRuntime": true,
+      "entitlements": "resources/entitlements.mac.plist",
+      "entitlementsInherit": "resources/entitlements.mac.plist"
+    },
+    "win": {
+      "icon": "resources/icon.ico",
+      "target": ["nsis", "portable"]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "extraResources": [
+      {
+        "from": "resources/NYLE_PR_PROMPT.md",
+        "to": "NYLE_PR_PROMPT.md"
+      }
+    ]
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "electron-store": "^8.2.0",
+    "keytar": "^7.9.0"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.0"
+  }
+}

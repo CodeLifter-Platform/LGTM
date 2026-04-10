@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LGTM</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- ─── Draggable title bar ─────────────────────────────── -->
+  <header id="titlebar">
+    <span class="logo">LGTM</span>
+    <span class="subtitle" id="subtitle"></span>
+  </header>
+
+  <!-- ─── PAT Setup (first-run gate) ─────────────────────── -->
+  <section id="pat-setup" class="view">
+    <div class="card">
+      <h2>Connect to Azure DevOps</h2>
+      <p class="hint">Enter your organization URL and Personal Access Token. The PAT needs <strong>Code (Read)</strong> scope at minimum.</p>
+
+      <label for="org-url">Organization URL</label>
+      <input type="url" id="org-url" placeholder="https://dev.azure.com/myorg" spellcheck="false">
+
+      <label for="pat-input">Personal Access Token</label>
+      <input type="password" id="pat-input" placeholder="paste your PAT here" spellcheck="false">
+
+      <button id="pat-submit" class="btn-primary">Validate &amp; Connect</button>
+
+      <div id="pat-status-msg" class="status-msg"></div>
+    </div>
+  </section>
+
+  <!-- ─── Main PR list ────────────────────────────────────── -->
+  <section id="pr-list-view" class="view hidden">
+    <div class="toolbar">
+      <button id="refresh-btn" class="btn-icon" title="Refresh PRs">↻</button>
+      <button id="settings-btn" class="btn-icon" title="Settings">⚙</button>
+    </div>
+
+    <div id="pr-list" class="pr-list">
+      <div class="loading">Loading PRs…</div>
+    </div>
+
+    <div id="no-prs" class="empty-state hidden">
+      <p>No open pull requests found.</p>
+    </div>
+  </section>
+
+  <!-- ─── Settings panel ──────────────────────────────────── -->
+  <section id="settings-view" class="view hidden">
+    <div class="card">
+      <h2>Settings</h2>
+
+      <label for="s-prompt-path">Custom prompt file path</label>
+      <input type="text" id="s-prompt-path" placeholder="(uses bundled default)">
+      <p class="hint">Absolute path to your NYLE_PR_PROMPT.md. Leave blank to use the bundled one, or place one in your repo root.</p>
+
+      <label for="s-webhook-port">Webhook port</label>
+      <input type="number" id="s-webhook-port" value="3847">
+
+      <label for="s-poll-interval">Polling interval (seconds)</label>
+      <input type="number" id="s-poll-interval" value="60" min="10">
+
+      <div class="btn-row">
+        <button id="settings-save" class="btn-primary">Save</button>
+        <button id="settings-back" class="btn-secondary">Back</button>
+      </div>
+
+      <hr>
+      <button id="disconnect-btn" class="btn-danger">Disconnect &amp; Clear PAT</button>
+    </div>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>
