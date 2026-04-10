@@ -138,6 +138,7 @@ class DevOpsClient {
               sourceBranch: pr.sourceRefName,     // refs/heads/feature-x
               targetBranch: pr.targetRefName,     // refs/heads/main
               createdBy: pr.createdBy?.displayName || '',
+              createdDate: pr.creationDate || '',
               url: pr.url,
               webUrl: `${this.orgUrl}/${encodeURIComponent(project.name)}/_git/${encodeURIComponent(repo.name)}/pullrequest/${pr.pullRequestId}`,
               reviewStatus: this._reviewStatus(pr),
@@ -148,6 +149,10 @@ class DevOpsClient {
         // skip projects we can't read
       }
     }
+
+    // Sort by creation date descending (newest first) — matches the
+    // default order of the Active panel in Azure DevOps.
+    allPrs.sort((a, b) => new Date(b.createdDate) - new Date(a.createdDate));
 
     return allPrs;
   }
