@@ -7,12 +7,19 @@
 
 const axios = require('axios');
 
+// Azure DevOps API version — 7.0 is widely supported across both
+// Azure DevOps Services (cloud) and Server 2022+.
+// Version 7.1 can 404 on older instances.
+const API_VERSION = '7.0';
+
 class DevOpsClient {
   /**
    * @param {string} pat   - Personal Access Token
    * @param {string} orgUrl - e.g. "https://dev.azure.com/myorg"
+   *                          or    "https://myorg.visualstudio.com"
    */
   constructor(pat, orgUrl) {
+    // Normalise: strip trailing slashes
     this.orgUrl = orgUrl.replace(/\/+$/, '');
     this.api = axios.create({
       baseURL: this.orgUrl,
@@ -21,12 +28,23 @@ class DevOpsClient {
         'Content-Type': 'application/json',
       },
     });
+
+    // Log request errors with the actual URL for debugging
+    this.api.interceptors.response.use(
+      (res) => res,
+      (err) => {
+        const url = err.config ? `${err.config.baseURL}${err.config.url}` : 'unknown';
+        const status = err.response ? err.response.status : 'no response';
+        console.error(`[LGTM] API error: ${status} → ${url}`);
+        throw err;
+      },
+    );
   }
 
   // ── Projects ─────────────────────────────────────────────────────
   async getProjects() {
     const res = await this.api.get('/_apis/projects', {
-      params: { 'api-version': '7.1' },
+      params: { 'api-version': API_VERSION },
     });
     return res.data.value || [];
   }
@@ -73,7 +91,7 @@ class DevOpsClient {
 
   async getRepos(project) {
     const res = await this.api.get(`/${encodeURIComponent(project)}/_apis/git/repositories`, {
-      params: { 'api-version': '7.1' },
+      params: { 'api-version': API_VERSION },
     });
     return res.data.value || [];
   }
@@ -81,7 +99,7 @@ class DevOpsClient {
   async getOpenPRs(project, repoId) {
     const res = await this.api.get(
       `/${encodeURIComponent(project)}/_apis/git/repositories/${repoId}/pullrequests`,
-      { params: { 'searchCriteria.status': 'active', 'api-version': '7.1' } },
+      { params: { 'searchCriteria.status': 'active', 'api-version': API_VERSION } },
     );
     return res.data.value || [];
   }
@@ -98,7 +116,7 @@ class DevOpsClient {
         comments: [{ parentCommentId: 0, content: commentText, commentType: 1 }],
         status: 1, // active
       },
-      { params: { 'api-version': '7.1' } },
+      { params: { 'api-version': API_VERSION } },
     );
     return res.data;
   }
@@ -111,7 +129,7 @@ class DevOpsClient {
     // We need the reviewer ID — use "me" shortcut via the PR reviewers endpoint
     const res = await this.api.get(
       `/${encodeURIComponent(project)}/_apis/git/repositories/${repoId}/pullrequests/${prId}/reviewers`,
-      { params: { 'api-version': '7.1' } },
+      { params: { 'api-version': API_VERSION } },
     );
     // Find the authenticated user or just return
     return res.data;

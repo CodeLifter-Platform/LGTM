@@ -183,7 +183,14 @@ ipcMain.handle('validate-pat', async (_event, { pat, orgUrl }) => {
     }
     return { success: false, error: 'PAT valid but no projects found.' };
   } catch (err) {
-    return { success: false, error: err.message };
+    const status = err.response?.status;
+    let msg = err.message;
+    if (status === 404) {
+      msg = `404 Not Found — check your org URL. It should look like "https://dev.azure.com/yourorg" (or "https://yourorg.visualstudio.com" for older orgs). Got: ${orgUrl}`;
+    } else if (status === 401 || status === 403) {
+      msg = `${status} — PAT was rejected. Make sure it hasn't expired and has Code (Read) scope.`;
+    }
+    return { success: false, error: msg };
   }
 });
 
