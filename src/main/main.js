@@ -229,13 +229,18 @@ ipcMain.handle('get-reviews', () => {
 
 // ── Agent discovery ──────────────────────────────────────────────────
 
+// Strip non-serializable fields (buildCmd function) before sending to renderer
+function serializeAgents(agentList) {
+  return agentList.map(({ buildCmd, ...rest }) => rest);
+}
+
 ipcMain.handle('get-agents', () => {
-  return agentRegistry.getAll();
+  return serializeAgents(agentRegistry.getAll());
 });
 
 ipcMain.handle('refresh-agents', () => {
   agentRegistry.refresh();
-  return agentRegistry.getAll();
+  return serializeAgents(agentRegistry.getAll());
 });
 
 // ── Settings ─────────────────────────────────────────────────────────
