@@ -68,8 +68,27 @@ patSubmit.addEventListener('click', async () => {
 });
 
 function setPatMsg(msg, type = '') {
-  patStatusMsg.textContent = msg;
   patStatusMsg.className = 'status-msg ' + type;
+  patStatusMsg.innerHTML = '';
+  if (!msg) return;
+
+  const text = document.createElement('span');
+  text.textContent = msg;
+  patStatusMsg.appendChild(text);
+
+  if (type === 'error') {
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'btn-copy';
+    copyBtn.title = 'Copy error to clipboard';
+    copyBtn.textContent = '⧉';
+    copyBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(msg).then(() => {
+        copyBtn.textContent = '✓';
+        setTimeout(() => { copyBtn.textContent = '⧉'; }, 1500);
+      });
+    });
+    patStatusMsg.appendChild(copyBtn);
+  }
 }
 
 // ── PR list rendering ────────────────────────────────────────────
