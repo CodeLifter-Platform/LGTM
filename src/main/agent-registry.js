@@ -44,15 +44,15 @@ const AGENTS = [
   {
     id: 'augment',
     name: 'Augment Code',
-    cli: 'augment',
+    cli: ['augment', 'aug', 'augment-code', 'augcode'],  // try multiple names
     models: [
       { id: 'default', label: 'Default' },
     ],
-    buildCmd: (prompt, model) => {
-      // Augment CLI — adjust flags as their CLI evolves
+    buildCmd: (prompt, model, resolvedCli) => {
+      const cmd = resolvedCli || 'augment';
       const args = ['run', '--prompt', prompt];
       if (model && model !== 'default') args.push('--model', model);
-      return { command: 'augment', args };
+      return { command: cmd, args };
     },
   },
 ];
@@ -86,10 +86,29 @@ class AgentRegistry {
    * Re-detect which CLIs are available on this machine.
    */
   refresh() {
-    this._cache = {};
+    this._cache = {};       // agentId → boolean
+    this._resolvedCli = {}; // agentId → actual command name found
+
     for (const agent of AGENTS) {
-      this._cache[agent.id] = AgentRegistry._isInstalled(agent.cli);
+      const cliNames = Array.isArray(agent.cli) ? agent.cli : [agent.cli];
+      let found = false;
+
+      for (const name of cliNames) {
+        if (AgentRegistry._isInstalled(name)) {
+          this._cache[agent.id] = true;
+          this._resolvedCli[agent.id] = name;
+          console.log(`[LGTM] Agent "${agent.name}" found via: ${name}`);
+          found = true;
+          break;
+        }
+      }
+
+      if (!found) {
+        this._cache[agent.id] = false;
+        console.log(`[LGTM] Agent "${agent.name}" not found. Tried: ${cliNames.join(', ')}`);
+      }
     }
+
     return this._cache;
   }
 
@@ -99,7 +118,8 @@ class AgentRegistry {
   buildCommand(agentId, prompt, model) {
     const agent = AGENTS.find((a) => a.id === agentId);
     if (!agent) throw new Error(`Unknown agent: ${agentId}`);
-    return agent.buildCmd(prompt, model);
+    const resolvedCli = this._resolvedCli ? this._resolvedCli[agentId] : null;
+    return agent.buildCmd(prompt, model, resolvedCli);
   }
 
   /**
@@ -108,7 +128,8 @@ class AgentRegistry {
   static _isInstalled(command) {
     try {
       const which = process.platform === 'win32' ? 'where' : 'which';
-      execSync(`${which} ${command}`, { stdio: 'ignore', timeout: 5000 });
+      const result = execSync(`${which} ${command}`, { timeout: 5000, encoding: 'utf8' }).trim();
+      console.log(`[LGTM]   which ${command} → ${result}`);
       return true;
     } catch {
       return false;
