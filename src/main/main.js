@@ -2,7 +2,8 @@ const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, shell } = require(
 const path = require('path');
 const { PatStore } = require('./pat-store');
 const { DevOpsClient } = require('./devops-client');
-const { ClaudeRunner } = require('./claude-runner');
+const { AgentRunner } = require('./agent-runner');
+const { AgentRegistry } = require('./agent-registry');
 const { WebhookServer } = require('./webhook-server');
 const ElectronStore = require('electron-store');
 
@@ -11,7 +12,8 @@ let tray = null;
 let mainWindow = null;
 let patStore = null;
 let devopsClient = null;
-let claudeRunner = null;
+let agentRunner = null;
+let agentRegistry = null;
 let webhookServer = null;
 const config = new ElectronStore({
   defaults: {
@@ -19,6 +21,8 @@ const config = new ElectronStore({
     webhookPort: 3847,
     promptPath: '',         // user-override path to NYLE_PR_PROMPT.md
     pollingIntervalMs: 60000,
+    defaultAgent: 'claude', // default agent id
+    agentModels: {},        // { agentId: selectedModelId }
   },
 });
 
@@ -32,7 +36,8 @@ app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.dock.hide();
 
   patStore = new PatStore();
-  claudeRunner = new ClaudeRunner(config);
+  agentRegistry = new AgentRegistry();
+  agentRunner = new AgentRunner(config);
 
   createTray();
   createWindow();
@@ -56,13 +61,11 @@ app.on('window-all-closed', (e) => e.preventDefault()); // keep tray alive
 
 // ── Tray ─────────────────────────────────────────────────────────────
 function createTray() {
-  // Use a simple template image; on macOS the "Template" suffix enables dark/light
   const iconPath = path.join(__dirname, '..', 'assets', 'tray-iconTemplate.png');
   let icon;
   try {
     icon = nativeImage.createFromPath(iconPath);
   } catch {
-    // Fallback: 16x16 transparent image
     icon = nativeImage.createEmpty();
   }
   tray = new Tray(icon);
@@ -141,11 +144,9 @@ function showSettings() {
 async function initDevOps(pat, orgUrl) {
   devopsClient = new DevOpsClient(pat, orgUrl);
 
-  // Start polling
   pollPrs();
   setInterval(pollPrs, config.get('pollingIntervalMs'));
 
-  // Start webhook server
   webhookServer = new WebhookServer(config.get('webhookPort'), (event) => {
     handleWebhookEvent(event);
   });
@@ -162,9 +163,8 @@ async function pollPrs() {
 }
 
 function handleWebhookEvent(event) {
-  // Azure DevOps sends events like 'git.pullrequest.created', 'git.pullrequest.updated', etc.
   if (event.eventType && event.eventType.startsWith('git.pullrequest')) {
-    pollPrs(); // refresh immediately
+    pollPrs();
   }
 }
 
@@ -180,7 +180,7 @@ ipcMain.handle('validate-pat', async (_event, { pat, orgUrl }) => {
     const projects = await client.getProjects();
     if (projects && projects.length > 0) {
       await patStore.set(pat);
-      config.set('orgUrl', orgUrl);  // save original URL (with project) so filter persists
+      config.set('orgUrl', orgUrl);
       await initDevOps(pat, orgUrl);
 
       const projectNames = projects.map((p) => p.name);
@@ -214,24 +214,40 @@ ipcMain.handle('refresh-prs', async () => {
   }
 });
 
-// Launch Claude Code review for a PR
-ipcMain.handle('review-pr', async (_event, pr) => {
+// Launch a review for a PR using the chosen agent
+ipcMain.handle('review-pr', async (_event, { pr, agentId, model }) => {
   const promptPath = resolvePromptPath();
-  return claudeRunner.startReview(pr, promptPath);
+  const agent = agentId || config.get('defaultAgent') || 'claude';
+  const mdl = model || config.get('agentModels')[agent] || null;
+  return agentRunner.startReview(pr, promptPath, agent, mdl);
 });
 
 // Get running reviews
 ipcMain.handle('get-reviews', () => {
-  return claudeRunner.getActiveReviews();
+  return agentRunner.getActiveReviews();
 });
 
-// Settings
+// ── Agent discovery ──────────────────────────────────────────────────
+
+ipcMain.handle('get-agents', () => {
+  return agentRegistry.getAll();
+});
+
+ipcMain.handle('refresh-agents', () => {
+  agentRegistry.refresh();
+  return agentRegistry.getAll();
+});
+
+// ── Settings ─────────────────────────────────────────────────────────
+
 ipcMain.handle('get-settings', () => {
   return {
     orgUrl: config.get('orgUrl'),
     webhookPort: config.get('webhookPort'),
     promptPath: config.get('promptPath'),
     pollingIntervalMs: config.get('pollingIntervalMs'),
+    defaultAgent: config.get('defaultAgent'),
+    agentModels: config.get('agentModels'),
   };
 });
 
@@ -239,6 +255,8 @@ ipcMain.handle('save-settings', async (_event, settings) => {
   if (settings.promptPath !== undefined) config.set('promptPath', settings.promptPath);
   if (settings.webhookPort !== undefined) config.set('webhookPort', settings.webhookPort);
   if (settings.pollingIntervalMs !== undefined) config.set('pollingIntervalMs', settings.pollingIntervalMs);
+  if (settings.defaultAgent !== undefined) config.set('defaultAgent', settings.defaultAgent);
+  if (settings.agentModels !== undefined) config.set('agentModels', settings.agentModels);
   return { success: true };
 });
 
@@ -254,6 +272,5 @@ ipcMain.handle('clear-pat', async () => {
 function resolvePromptPath() {
   const userPath = config.get('promptPath');
   if (userPath) return userPath;
-  // Bundled default
   return path.join(process.resourcesPath || path.join(__dirname, '..', '..', 'resources'), 'NYLE_PR_PROMPT.md');
 }

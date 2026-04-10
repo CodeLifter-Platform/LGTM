@@ -172,10 +172,26 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 /* ── Toolbar ───────────────────────────────────────────────────── */
 .toolbar {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
   gap: 4px;
   margin-bottom: 8px;
 }
+
+/* ── Agent select (toolbar dropdown) ───────────────────────────── */
+.agent-select {
+  -webkit-app-region: no-drag;
+  flex: 1;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+}
+.agent-select:focus { border-color: var(--accent); }
+.agent-select option:disabled { color: var(--text-dim); }
 
 /* ── PR list ───────────────────────────────────────────────────── */
 .pr-list {
@@ -272,4 +288,101 @@ hr {
   border: none;
   border-top: 1px solid var(--border);
   margin-top: 16px;
+}
+
+/* ── Agent config (settings panel) ─────────────────────────────── */
+.card h3 {
+  font-size: 13px;
+  color: var(--accent);
+  margin-top: 12px;
+  margin-bottom: 4px;
+}
+
+.agent-config-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.agent-config-row {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  transition: border-color 0.15s;
+}
+.agent-config-row:has(input:checked) {
+  border-color: var(--accent);
+}
+.agent-config-row.disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.agent-config-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-config-header input[type="radio"] {
+  accent-color: var(--accent);
+  margin: 0;
+  cursor: pointer;
+}
+
+.agent-config-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  cursor: pointer;
+  flex: 1;
+}
+
+.agent-status-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+.agent-status-badge.installed {
+  background: rgba(46, 204, 113, 0.15);
+  color: var(--green);
+}
+.agent-status-badge.missing {
+  background: rgba(136, 146, 164, 0.15);
+  color: var(--text-dim);
+}
+
+.agent-config-model {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding-left: 22px;
+}
+
+.agent-config-model-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+
+.agent-model-select {
+  flex: 1;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+}
+.agent-model-select:focus { border-color: var(--accent); }
+.agent-model-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
