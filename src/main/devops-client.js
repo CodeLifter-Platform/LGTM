@@ -15,12 +15,17 @@ const API_VERSION = '7.0';
 class DevOpsClient {
   /**
    * @param {string} pat   - Personal Access Token
-   * @param {string} orgUrl - e.g. "https://dev.azure.com/myorg"
-   *                          or    "https://myorg.visualstudio.com"
+   * @param {string} orgUrl - Full URL which may include a project path, e.g.
+   *                          "https://dev.azure.com/myorg"
+   *                          "https://dev.azure.com/myorg/MyProject"
+   *                          "https://myorg.visualstudio.com"
+   *                          "https://myorg.visualstudio.com/MyProject"
    */
   constructor(pat, orgUrl) {
-    // Normalise: strip trailing slashes
-    this.orgUrl = orgUrl.replace(/\/+$/, '');
+    const parsed = DevOpsClient.parseOrgUrl(orgUrl);
+    this.orgUrl = parsed.orgUrl;
+    this.projectFilter = parsed.project;  // null or e.g. "CommoditySolutions"
+
     this.api = axios.create({
       baseURL: this.orgUrl,
       headers: {
@@ -41,6 +46,56 @@ class DevOpsClient {
     );
   }
 
+  /**
+   * Parse a user-provided URL into org base URL + optional project.
+   *
+   * Handles:
+   *   https://dev.azure.com/myorg                    → org only
+   *   https://dev.azure.com/myorg/MyProject           → org + project
+   *   https://myorg.visualstudio.com                  → org only
+   *   https://myorg.visualstudio.com/MyProject        → org + project
+   *   https://myorg.visualstudio.com/MyProject/_git/… → org + project (extra path stripped)
+   */
+  static parseOrgUrl(raw) {
+    let url = raw.replace(/\/+$/, '');
+
+    try {
+      const u = new URL(url);
+      const parts = u.pathname.split('/').filter(Boolean);
+
+      if (u.hostname === 'dev.azure.com') {
+        // dev.azure.com/<org>[/<project>[/…]]
+        const org = parts[0] || '';
+        const project = parts[1] || null;
+        return {
+          orgUrl: `${u.protocol}//${u.hostname}/${org}`,
+          project,
+        };
+      }
+
+      if (u.hostname.endsWith('.visualstudio.com')) {
+        // <org>.visualstudio.com[/<project>[/…]]
+        const project = parts[0] || null;
+        return {
+          orgUrl: `${u.protocol}//${u.hostname}`,
+          project,
+        };
+      }
+
+      // On-prem / unknown — treat first path segment as collection,
+      // second as possible project
+      const project = parts.length >= 2 ? parts[1] : null;
+      const basePath = parts.length >= 1 ? `/${parts[0]}` : '';
+      return {
+        orgUrl: `${u.protocol}//${u.hostname}${basePath}`,
+        project,
+      };
+    } catch {
+      // Couldn't parse — return as-is
+      return { orgUrl: url, project: null };
+    }
+  }
+
   // ── Projects ─────────────────────────────────────────────────────
   async getProjects() {
     const res = await this.api.get('/_apis/projects', {
@@ -56,7 +111,15 @@ class DevOpsClient {
    * Returns a flat array of normalised PR objects.
    */
   async getAllOpenPRs() {
-    const projects = await this.getProjects();
+    let projects = await this.getProjects();
+
+    // If the user provided a project in the URL, only show PRs from that project
+    if (this.projectFilter) {
+      projects = projects.filter(
+        (p) => p.name.toLowerCase() === this.projectFilter.toLowerCase(),
+      );
+    }
+
     const allPrs = [];
 
     for (const project of projects) {

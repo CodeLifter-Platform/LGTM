@@ -174,19 +174,28 @@ function handleWebhookEvent(event) {
 ipcMain.handle('validate-pat', async (_event, { pat, orgUrl }) => {
   try {
     const client = new DevOpsClient(pat, orgUrl);
+    const parsed = DevOpsClient.parseOrgUrl(orgUrl);
+    console.log(`[LGTM] Connecting to org: ${parsed.orgUrl}${parsed.project ? ` (project filter: ${parsed.project})` : ''}`);
+
     const projects = await client.getProjects();
     if (projects && projects.length > 0) {
       await patStore.set(pat);
-      config.set('orgUrl', orgUrl);
+      config.set('orgUrl', orgUrl);  // save original URL (with project) so filter persists
       await initDevOps(pat, orgUrl);
-      return { success: true, projects: projects.map((p) => p.name) };
+
+      const projectNames = projects.map((p) => p.name);
+      const filterNote = parsed.project
+        ? ` Filtered to project "${parsed.project}".`
+        : '';
+      return { success: true, projects: projectNames, filterNote };
     }
     return { success: false, error: 'PAT valid but no projects found.' };
   } catch (err) {
     const status = err.response?.status;
+    const parsed = DevOpsClient.parseOrgUrl(orgUrl);
     let msg = err.message;
     if (status === 404) {
-      msg = `404 Not Found — check your org URL. It should look like "https://dev.azure.com/yourorg" (or "https://yourorg.visualstudio.com" for older orgs). Got: ${orgUrl}`;
+      msg = `404 Not Found — API call to ${parsed.orgUrl}/_apis/projects failed. Check your org URL.`;
     } else if (status === 401 || status === 403) {
       msg = `${status} — PAT was rejected. Make sure it hasn't expired and has Code (Read) scope.`;
     }
