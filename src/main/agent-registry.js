@@ -44,7 +44,7 @@ const AGENTS = [
   {
     id: 'augment',
     name: 'Augment Code',
-    cli: ['augment', 'aug', 'augment-code', 'augcode'],  // try multiple names
+    cli: ['auggie', 'augment', 'aug', 'augment-code', 'augcode'],  // try multiple names
     models: [
       { id: 'default', label: 'Default' },
     ],
