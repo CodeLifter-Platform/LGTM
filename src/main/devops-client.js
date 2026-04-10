@@ -127,7 +127,7 @@ class DevOpsClient {
         const repos = await this.getRepos(project.name);
         for (const repo of repos) {
           const prs = await this.getOpenPRs(project.name, repo.id);
-          for (const pr of prs) {
+          for (const pr of prs.filter((p) => p.status === 'active')) {
             allPrs.push({
               id: pr.pullRequestId,
               title: pr.title,
