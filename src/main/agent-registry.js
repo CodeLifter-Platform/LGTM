@@ -46,10 +46,15 @@ const AGENTS = [
     name: 'Augment Code',
     cli: ['auggie', 'augment', 'aug', 'augment-code', 'augcode'],  // try multiple names
     models: [
-      { id: 'default', label: 'Default' },
+      { id: 'default',    label: 'Default (auto)' },
+      { id: 'claude-opus-4-6',   label: 'Claude Opus 4.6' },
+      { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+      { id: 'gpt-4.1',    label: 'GPT-4.1' },
+      { id: 'o4-mini',    label: 'o4-mini' },
+      { id: 'o3',         label: 'o3' },
     ],
     buildCmd: (prompt, model, resolvedCli) => {
-      const cmd = resolvedCli || 'augment';
+      const cmd = resolvedCli || 'auggie';
       const args = ['run', '--prompt', prompt];
       if (model && model !== 'default') args.push('--model', model);
       return { command: cmd, args };
