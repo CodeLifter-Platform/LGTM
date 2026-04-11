@@ -4,6 +4,7 @@ const { PatStore } = require('./pat-store');
 const { DevOpsClient } = require('./devops-client');
 const { AgentRunner } = require('./agent-runner');
 const { AgentRegistry } = require('./agent-registry');
+const { PromptResolver } = require('./prompt-resolver');
 const { WebhookServer } = require('./webhook-server');
 const ElectronStore = require('electron-store');
 
@@ -15,14 +16,17 @@ let devopsClient = null;
 let agentRunner = null;
 let agentRegistry = null;
 let webhookServer = null;
+let currentPat = null;
+
 const config = new ElectronStore({
   defaults: {
     orgUrl: '',
     webhookPort: 3847,
-    promptPath: '',         // user-override path to NYLE_PR_PROMPT.md
+    promptPath: '',           // global fallback prompt path
     pollingIntervalMs: 60000,
-    defaultAgent: 'claude', // default agent id
-    agentModels: {},        // { agentId: selectedModelId }
+    defaultAgent: 'claude',
+    agentModels: {},          // { agentId: selectedModelId }
+    repoConfigs: {},          // { "project/repo": { mode, repoFile, customPath } }
   },
 });
 
@@ -32,7 +36,6 @@ if (!gotLock) { app.quit(); }
 
 // ── App lifecycle ────────────────────────────────────────────────────
 app.whenReady().then(async () => {
-  // Hide dock icon on macOS – this is a menu-bar-only app
   if (process.platform === 'darwin') app.dock.hide();
 
   patStore = new PatStore();
@@ -42,10 +45,11 @@ app.whenReady().then(async () => {
   createTray();
   createWindow();
 
-  // Check if PAT already stored
   const existingPat = await patStore.get();
   const orgUrl = config.get('orgUrl');
   if (existingPat && orgUrl) {
+    currentPat = existingPat;
+    agentRunner.setCredentials(existingPat, DevOpsClient.parseOrgUrl(orgUrl).orgUrl);
     mainWindow.webContents.once('did-finish-load', () => {
       mainWindow.webContents.send('pat-status', { hasPat: true, orgUrl });
     });
@@ -57,17 +61,14 @@ app.whenReady().then(async () => {
   }
 });
 
-app.on('window-all-closed', (e) => e.preventDefault()); // keep tray alive
+app.on('window-all-closed', (e) => e.preventDefault());
 
 // ── Tray ─────────────────────────────────────────────────────────────
 function createTray() {
   const iconPath = path.join(__dirname, '..', 'assets', 'tray-iconTemplate.png');
   let icon;
-  try {
-    icon = nativeImage.createFromPath(iconPath);
-  } catch {
-    icon = nativeImage.createEmpty();
-  }
+  try { icon = nativeImage.createFromPath(iconPath); }
+  catch { icon = nativeImage.createEmpty(); }
   tray = new Tray(icon);
   tray.setToolTip('LGTM — PR Reviewer');
   tray.on('click', toggleWindow);
@@ -85,13 +86,15 @@ function createTray() {
 // ── Window ───────────────────────────────────────────────────────────
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 420,
-    height: 600,
+    width: 480,
+    height: 700,
     show: false,
     frame: false,
-    resizable: false,
+    resizable: true,
     skipTaskbar: true,
     alwaysOnTop: true,
+    minWidth: 380,
+    minHeight: 400,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -102,27 +105,17 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 
   mainWindow.on('blur', () => {
-    if (!mainWindow.webContents.isDevToolsOpened()) {
-      mainWindow.hide();
-    }
+    if (!mainWindow.webContents.isDevToolsOpened()) mainWindow.hide();
   });
 
   mainWindow.on('close', (e) => {
-    if (!app.isQuitting) {
-      e.preventDefault();
-      mainWindow.hide();
-    }
+    if (!app.isQuitting) { e.preventDefault(); mainWindow.hide(); }
   });
 }
 
 function toggleWindow() {
-  if (mainWindow.isVisible()) {
-    mainWindow.hide();
-  } else {
-    positionWindowByTray();
-    mainWindow.show();
-    mainWindow.focus();
-  }
+  if (mainWindow.isVisible()) { mainWindow.hide(); }
+  else { positionWindowByTray(); mainWindow.show(); mainWindow.focus(); }
 }
 
 function positionWindowByTray() {
@@ -168,9 +161,8 @@ function handleWebhookEvent(event) {
   }
 }
 
-// ── IPC handlers ─────────────────────────────────────────────────────
+// ── IPC: Authentication ──────────────────────────────────────────────
 
-// PAT validation & save
 ipcMain.handle('validate-pat', async (_event, { pat, orgUrl }) => {
   try {
     const client = new DevOpsClient(pat, orgUrl);
@@ -181,12 +173,12 @@ ipcMain.handle('validate-pat', async (_event, { pat, orgUrl }) => {
     if (projects && projects.length > 0) {
       await patStore.set(pat);
       config.set('orgUrl', orgUrl);
+      currentPat = pat;
+      agentRunner.setCredentials(pat, parsed.orgUrl);
       await initDevOps(pat, orgUrl);
 
       const projectNames = projects.map((p) => p.name);
-      const filterNote = parsed.project
-        ? ` Filtered to project "${parsed.project}".`
-        : '';
+      const filterNote = parsed.project ? ` Filtered to project "${parsed.project}".` : '';
       return { success: true, projects: projectNames, filterNote };
     }
     return { success: false, error: 'PAT valid but no projects found.' };
@@ -194,16 +186,23 @@ ipcMain.handle('validate-pat', async (_event, { pat, orgUrl }) => {
     const status = err.response?.status;
     const parsed = DevOpsClient.parseOrgUrl(orgUrl);
     let msg = err.message;
-    if (status === 404) {
-      msg = `404 Not Found — API call to ${parsed.orgUrl}/_apis/projects failed. Check your org URL.`;
-    } else if (status === 401 || status === 403) {
-      msg = `${status} — PAT was rejected. Make sure it hasn't expired and has Code (Read) scope.`;
-    }
+    if (status === 404) msg = `404 Not Found — API call to ${parsed.orgUrl}/_apis/projects failed. Check your org URL.`;
+    else if (status === 401 || status === 403) msg = `${status} — PAT was rejected. Make sure it hasn't expired and has Code (Read) scope.`;
     return { success: false, error: msg };
   }
 });
 
-// Fetch PRs on demand
+ipcMain.handle('clear-pat', async () => {
+  await patStore.delete();
+  config.set('orgUrl', '');
+  currentPat = null;
+  devopsClient = null;
+  if (webhookServer) webhookServer.stop();
+  return { success: true };
+});
+
+// ── IPC: PRs ─────────────────────────────────────────────────────────
+
 ipcMain.handle('refresh-prs', async () => {
   if (!devopsClient) return { success: false, error: 'Not authenticated' };
   try {
@@ -214,47 +213,46 @@ ipcMain.handle('refresh-prs', async () => {
   }
 });
 
-// Launch a review for a PR using the chosen agent
+// ── IPC: Reviews ─────────────────────────────────────────────────────
+
 ipcMain.handle('review-pr', async (_event, { pr, agentId, model }) => {
-  const promptPath = resolvePromptPath();
   const agent = agentId || config.get('defaultAgent') || 'claude';
   const mdl = model || config.get('agentModels')[agent] || null;
-  return agentRunner.startReview(pr, promptPath, agent, mdl);
+  return agentRunner.startReview(pr, agent, mdl);
 });
 
-// Get running reviews
 ipcMain.handle('get-reviews', () => {
   return agentRunner.getActiveReviews();
 });
 
-// ── Agent discovery ──────────────────────────────────────────────────
+ipcMain.handle('get-review-output', (_event, key) => {
+  return agentRunner.getReviewOutput(key);
+});
 
-// Strip non-serializable fields (buildCmd function) before sending to renderer
+// ── IPC: Agents ──────────────────────────────────────────────────────
+
 function serializeAgents(agentList) {
   return agentList.map(({ buildCmd, ...rest }) => rest);
 }
 
-ipcMain.handle('get-agents', () => {
-  return serializeAgents(agentRegistry.getAll());
-});
+ipcMain.handle('get-agents', () => serializeAgents(agentRegistry.getAll()));
 
 ipcMain.handle('refresh-agents', () => {
   agentRegistry.refresh();
   return serializeAgents(agentRegistry.getAll());
 });
 
-// ── Settings ─────────────────────────────────────────────────────────
+// ── IPC: Settings ────────────────────────────────────────────────────
 
-ipcMain.handle('get-settings', () => {
-  return {
-    orgUrl: config.get('orgUrl'),
-    webhookPort: config.get('webhookPort'),
-    promptPath: config.get('promptPath'),
-    pollingIntervalMs: config.get('pollingIntervalMs'),
-    defaultAgent: config.get('defaultAgent'),
-    agentModels: config.get('agentModels'),
-  };
-});
+ipcMain.handle('get-settings', () => ({
+  orgUrl: config.get('orgUrl'),
+  webhookPort: config.get('webhookPort'),
+  promptPath: config.get('promptPath'),
+  pollingIntervalMs: config.get('pollingIntervalMs'),
+  defaultAgent: config.get('defaultAgent'),
+  agentModels: config.get('agentModels'),
+  repoConfigs: config.get('repoConfigs'),
+}));
 
 ipcMain.handle('save-settings', async (_event, settings) => {
   if (settings.promptPath !== undefined) config.set('promptPath', settings.promptPath);
@@ -262,20 +260,12 @@ ipcMain.handle('save-settings', async (_event, settings) => {
   if (settings.pollingIntervalMs !== undefined) config.set('pollingIntervalMs', settings.pollingIntervalMs);
   if (settings.defaultAgent !== undefined) config.set('defaultAgent', settings.defaultAgent);
   if (settings.agentModels !== undefined) config.set('agentModels', settings.agentModels);
+  if (settings.repoConfigs !== undefined) config.set('repoConfigs', settings.repoConfigs);
   return { success: true };
 });
 
-ipcMain.handle('clear-pat', async () => {
-  await patStore.delete();
-  config.set('orgUrl', '');
-  devopsClient = null;
-  if (webhookServer) webhookServer.stop();
-  return { success: true };
-});
+// ── IPC: Prompt conventions (for settings UI) ────────────────────────
 
-// ── Helpers ──────────────────────────────────────────────────────────
-function resolvePromptPath() {
-  const userPath = config.get('promptPath');
-  if (userPath) return userPath;
-  return path.join(process.resourcesPath || path.join(__dirname, '..', '..', 'resources'), 'NYLE_PR_PROMPT.md');
-}
+ipcMain.handle('get-prompt-conventions', () => {
+  return PromptResolver.getConventionPaths();
+});

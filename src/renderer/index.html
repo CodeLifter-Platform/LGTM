@@ -32,7 +32,7 @@
       <p class="hint">Enter your organization URL and Personal Access Token. The PAT needs <strong>Code (Read)</strong> scope at minimum.</p>
 
       <label for="org-url">Organization URL</label>
-      <input type="url" id="org-url" placeholder="https://dev.azure.com/myorg" spellcheck="false">
+      <input type="url" id="org-url" placeholder="https://dev.azure.com/myorg or https://myorg.visualstudio.com/project" spellcheck="false">
 
       <label for="pat-input">Personal Access Token</label>
       <input type="password" id="pat-input" placeholder="paste your PAT here" spellcheck="false">
@@ -60,37 +60,60 @@
     </div>
   </section>
 
+  <!-- ─── Review detail panel ─────────────────────────────── -->
+  <section id="review-detail-view" class="view hidden">
+    <div class="review-detail-header">
+      <button id="review-back-btn" class="btn-icon" title="Back to PR list">←</button>
+      <div class="review-detail-info">
+        <span id="review-detail-title" class="review-detail-title"></span>
+        <span id="review-detail-meta" class="review-detail-meta"></span>
+      </div>
+      <div id="review-detail-dot" class="status-dot"></div>
+    </div>
+    <div id="review-output" class="review-output"></div>
+  </section>
+
   <!-- ─── Settings panel ──────────────────────────────────── -->
   <section id="settings-view" class="view hidden">
-    <div class="card">
-      <h2>Settings</h2>
+    <div class="settings-scroll">
+      <div class="card">
+        <h2>Settings</h2>
 
-      <label for="s-prompt-path">Custom prompt file path</label>
-      <input type="text" id="s-prompt-path" placeholder="(uses bundled default)">
-      <p class="hint">Absolute path to your NYLE_PR_PROMPT.md. Leave blank to use the bundled one, or place one in your repo root.</p>
+        <label for="s-prompt-path">Global fallback prompt file</label>
+        <input type="text" id="s-prompt-path" placeholder="(uses bundled default)">
+        <p class="hint">Used when no per-repo prompt is configured and none is found in the repo.</p>
 
-      <label for="s-webhook-port">Webhook port</label>
-      <input type="number" id="s-webhook-port" value="3847">
+        <label for="s-webhook-port">Webhook port</label>
+        <input type="number" id="s-webhook-port" value="3847">
 
-      <label for="s-poll-interval">Polling interval (seconds)</label>
-      <input type="number" id="s-poll-interval" value="60" min="10">
-
-      <!-- ─── Agent configuration ──────────────────────────── -->
-      <hr>
-      <h3>AI Agents</h3>
-      <p class="hint">Select the default model for each agent. Unavailable agents are grayed out — install their CLI to enable them.</p>
-
-      <div id="agent-config-list" class="agent-config-list"></div>
-
-      <hr>
-
-      <div class="btn-row">
-        <button id="settings-save" class="btn-primary">Save</button>
-        <button id="settings-back" class="btn-secondary">Back</button>
+        <label for="s-poll-interval">Polling interval (seconds)</label>
+        <input type="number" id="s-poll-interval" value="60" min="10">
       </div>
 
-      <hr>
-      <button id="disconnect-btn" class="btn-danger">Disconnect &amp; Clear PAT</button>
+      <!-- ─── AI Agents ───────────────────────────────────── -->
+      <div class="card">
+        <h2>AI Agents</h2>
+        <p class="hint">Select the default model for each agent. Unavailable agents are grayed out.</p>
+        <div id="agent-config-list" class="agent-config-list"></div>
+      </div>
+
+      <!-- ─── Per-repo prompt config ──────────────────────── -->
+      <div class="card">
+        <h2>Repo Prompt Configuration</h2>
+        <p class="hint">Configure which review prompt each repo uses. Auto-populated from your open PRs.</p>
+        <div id="repo-config-list" class="repo-config-list"></div>
+        <p class="hint" style="margin-top:10px" id="convention-hint"></p>
+      </div>
+
+      <div class="card">
+        <div class="btn-row">
+          <button id="settings-save" class="btn-primary">Save</button>
+          <button id="settings-back" class="btn-secondary">Back</button>
+        </div>
+
+        <hr>
+        <button id="disconnect-btn" class="btn-danger">Disconnect &amp; Clear PAT</button>
+      </div>
     </div>
   </section>
 

@@ -5,40 +5,54 @@
 // ── DOM refs ─────────────────────────────────────────────────────
 const $ = (sel) => document.querySelector(sel);
 
-const patSetup     = $('#pat-setup');
-const prListView   = $('#pr-list-view');
-const settingsView = $('#settings-view');
+const patSetup          = $('#pat-setup');
+const prListView        = $('#pr-list-view');
+const settingsView      = $('#settings-view');
+const reviewDetailView  = $('#review-detail-view');
 
-const orgUrlInput  = $('#org-url');
-const patInput     = $('#pat-input');
-const patSubmit    = $('#pat-submit');
-const patStatusMsg = $('#pat-status-msg');
+const orgUrlInput   = $('#org-url');
+const patInput      = $('#pat-input');
+const patSubmit     = $('#pat-submit');
+const patStatusMsg  = $('#pat-status-msg');
 
-const prListEl     = $('#pr-list');
-const noPrsEl      = $('#no-prs');
-const refreshBtn   = $('#refresh-btn');
-const settingsBtn  = $('#settings-btn');
-const agentSelect  = $('#agent-select');
+const prListEl      = $('#pr-list');
+const noPrsEl       = $('#no-prs');
+const refreshBtn    = $('#refresh-btn');
+const settingsBtn   = $('#settings-btn');
+const agentSelect   = $('#agent-select');
 
-const sPromptPath   = $('#s-prompt-path');
-const sWebhookPort  = $('#s-webhook-port');
-const sPollInterval = $('#s-poll-interval');
-const agentConfigList = $('#agent-config-list');
-const settingsSave  = $('#settings-save');
-const settingsBack  = $('#settings-back');
-const disconnectBtn = $('#disconnect-btn');
-const subtitleEl    = $('#subtitle');
+// Review detail
+const reviewBackBtn     = $('#review-back-btn');
+const reviewDetailTitle = $('#review-detail-title');
+const reviewDetailMeta  = $('#review-detail-meta');
+const reviewDetailDot   = $('#review-detail-dot');
+const reviewOutputEl    = $('#review-output');
+
+// Settings
+const sPromptPath       = $('#s-prompt-path');
+const sWebhookPort      = $('#s-webhook-port');
+const sPollInterval     = $('#s-poll-interval');
+const agentConfigList   = $('#agent-config-list');
+const repoConfigList    = $('#repo-config-list');
+const conventionHint    = $('#convention-hint');
+const settingsSave      = $('#settings-save');
+const settingsBack      = $('#settings-back');
+const disconnectBtn     = $('#disconnect-btn');
+const subtitleEl        = $('#subtitle');
 
 // ── State ────────────────────────────────────────────────────────
 let currentPrs = [];
-let reviewStatuses = {};   // key → { status, agentId }
-let agents = [];           // from agent registry
-let selectedAgent = null;  // current agent id for the toolbar dropdown
-let agentModels = {};      // { agentId: selectedModelId } from settings
+let reviewStatuses = {};     // key → { status, agentId, output }
+let agents = [];
+let selectedAgent = null;
+let agentModels = {};
+let repoConfigs = {};
+let activeDetailKey = null;  // which review is shown in the detail panel
+let knownRepos = new Set();  // "project/repo" strings from PR list
 
 // ── Navigation ───────────────────────────────────────────────────
 function showView(view) {
-  [patSetup, prListView, settingsView].forEach((v) => v.classList.add('hidden'));
+  [patSetup, prListView, settingsView, reviewDetailView].forEach((v) => v.classList.add('hidden'));
   view.classList.remove('hidden');
 }
 
@@ -48,6 +62,7 @@ async function loadAgents() {
   const settings = await window.lgtm.getSettings();
   selectedAgent = settings.defaultAgent || 'claude';
   agentModels = settings.agentModels || {};
+  repoConfigs = settings.repoConfigs || {};
   renderAgentSelect();
 }
 
@@ -64,26 +79,19 @@ function renderAgentSelect() {
   });
 }
 
-agentSelect.addEventListener('change', () => {
-  selectedAgent = agentSelect.value;
-});
+agentSelect.addEventListener('change', () => { selectedAgent = agentSelect.value; });
 
 // ── PAT flow ─────────────────────────────────────────────────────
 patSubmit.addEventListener('click', async () => {
   const pat = patInput.value.trim();
   const orgUrl = orgUrlInput.value.trim();
-
-  if (!pat || !orgUrl) {
-    setPatMsg('Please fill in both fields.', 'error');
-    return;
-  }
+  if (!pat || !orgUrl) { setPatMsg('Please fill in both fields.', 'error'); return; }
 
   patSubmit.disabled = true;
   patSubmit.textContent = 'Validating…';
   setPatMsg('');
 
   const result = await window.lgtm.validatePat(pat, orgUrl);
-
   if (result.success) {
     setPatMsg(`Connected! Found ${result.projects.length} project(s).`, 'success');
     await loadAgents();
@@ -94,7 +102,6 @@ patSubmit.addEventListener('click', async () => {
   } else {
     setPatMsg(result.error, 'error');
   }
-
   patSubmit.disabled = false;
   patSubmit.textContent = 'Validate & Connect';
 });
@@ -103,11 +110,9 @@ function setPatMsg(msg, type = '') {
   patStatusMsg.className = 'status-msg ' + type;
   patStatusMsg.innerHTML = '';
   if (!msg) return;
-
   const text = document.createElement('span');
   text.textContent = msg;
   patStatusMsg.appendChild(text);
-
   if (type === 'error') {
     const copyBtn = document.createElement('button');
     copyBtn.className = 'btn-copy';
@@ -128,6 +133,9 @@ function renderPrList(prs) {
   currentPrs = prs;
   prListEl.innerHTML = '';
 
+  // Track known repos for settings
+  (prs || []).forEach((pr) => knownRepos.add(`${pr.project}/${pr.repo}`));
+
   if (!prs || prs.length === 0) {
     prListEl.classList.add('hidden');
     noPrsEl.classList.remove('hidden');
@@ -142,51 +150,135 @@ function renderPrList(prs) {
     const review = reviewStatuses[key];
     const reviewStatus = review ? review.status : null;
     const reviewAgent = review ? review.agentId : null;
-
     const dotClass = reviewStatus || pr.reviewStatus || 'pending';
 
     const item = document.createElement('div');
     item.className = 'pr-item';
-    item.innerHTML = `
-      <div class="status-dot ${dotClass}" title="${dotClass}"></div>
-      <div class="pr-info">
-        <div class="pr-path">${esc(pr.repo)}/${pr.id}/${esc(pr.title)}</div>
-        <div class="pr-title">by ${esc(pr.createdBy)} · ${esc(pr.project)}</div>
-      </div>
-      ${reviewStatus ? `<span class="pr-review-badge ${reviewStatus}">${reviewAgent ? esc(reviewAgent) + ' · ' : ''}${reviewStatus}</span>` : ''}
+
+    // Status dot
+    const dot = document.createElement('div');
+    dot.className = `status-dot ${dotClass}`;
+    dot.title = dotClass;
+
+    // Info
+    const info = document.createElement('div');
+    info.className = 'pr-info';
+    info.innerHTML = `
+      <div class="pr-path">${esc(pr.repo)}/${pr.id}/${esc(pr.title)}</div>
+      <div class="pr-title">by ${esc(pr.createdBy)} · ${esc(pr.project)}</div>
     `;
 
-    item.addEventListener('click', () => startReview(pr));
+    // Badge + view button for active reviews
+    const actions = document.createElement('div');
+    actions.className = 'pr-actions';
+
+    if (reviewStatus) {
+      const badge = document.createElement('span');
+      badge.className = `pr-review-badge ${reviewStatus}`;
+      badge.textContent = reviewStatus === 'cloning' ? 'cloning…' : reviewStatus;
+      actions.appendChild(badge);
+
+      if (reviewStatus === 'running' || reviewStatus === 'completed' || reviewStatus === 'failed' || reviewStatus === 'cloning') {
+        const viewBtn = document.createElement('button');
+        viewBtn.className = 'btn-view-review';
+        viewBtn.textContent = '▸';
+        viewBtn.title = 'View review output';
+        viewBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openReviewDetail(key, pr, reviewStatus, reviewAgent);
+        });
+        actions.appendChild(viewBtn);
+      }
+    }
+
+    item.appendChild(dot);
+    item.appendChild(info);
+    item.appendChild(actions);
+
+    // Click to start review (only if not already running)
+    item.addEventListener('click', () => {
+      if (reviewStatus === 'running' || reviewStatus === 'cloning') {
+        openReviewDetail(key, pr, reviewStatus, reviewAgent);
+      } else {
+        startReview(pr);
+      }
+    });
+
     prListEl.appendChild(item);
   });
 }
 
 async function startReview(pr) {
   const key = `${pr.project}/${pr.repo}/${pr.id}`;
-  if (reviewStatuses[key] && reviewStatuses[key].status === 'running') {
-    return;
-  }
+  if (reviewStatuses[key] && (reviewStatuses[key].status === 'running' || reviewStatuses[key].status === 'cloning')) return;
 
   const agentId = selectedAgent || 'claude';
   const model = agentModels[agentId] || null;
 
+  // Optimistically show cloning state
+  reviewStatuses[key] = { status: 'cloning', agentId, output: '' };
+  renderPrList(currentPrs);
+
   const result = await window.lgtm.reviewPr({ pr, agentId, model });
-  if (result.success) {
-    reviewStatuses[key] = { status: 'running', agentId };
+  if (!result.success) {
+    reviewStatuses[key].status = 'failed';
+    reviewStatuses[key].output = result.error || 'Failed to start review.';
     renderPrList(currentPrs);
-  } else {
     alert(result.error);
   }
 }
+
+// ── Review detail panel ──────────────────────────────────────────
+async function openReviewDetail(key, pr, status, agentId) {
+  activeDetailKey = key;
+
+  reviewDetailTitle.textContent = `${pr.repo}/#${pr.id}`;
+  reviewDetailMeta.textContent = `${pr.title} · ${agentId || 'unknown'}`;
+  reviewDetailDot.className = `status-dot ${status}`;
+
+  // Load existing output
+  const existingOutput = await window.lgtm.getReviewOutput(key);
+  const localOutput = reviewStatuses[key] ? reviewStatuses[key].output : '';
+  const output = existingOutput || localOutput || '';
+
+  renderMarkdown(output);
+  showView(reviewDetailView);
+
+  // Auto-scroll to bottom
+  reviewOutputEl.scrollTop = reviewOutputEl.scrollHeight;
+}
+
+function renderMarkdown(text) {
+  // Simple markdown-ish rendering: escape HTML, then convert code blocks and basics
+  let html = escHtml(text);
+
+  // Code blocks: ```lang\n...\n```
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="lang-$1">$2</code></pre>');
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Bold
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Headers
+  html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>');
+  html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^# (.+)$/gm, '<h2>$1</h2>');
+  // Line breaks
+  html = html.replace(/\n/g, '<br>');
+
+  reviewOutputEl.innerHTML = html;
+}
+
+reviewBackBtn.addEventListener('click', () => {
+  activeDetailKey = null;
+  showView(prListView);
+});
 
 // ── Refresh ──────────────────────────────────────────────────────
 refreshBtn.addEventListener('click', async () => {
   refreshBtn.disabled = true;
   refreshBtn.textContent = '⟳';
   const result = await window.lgtm.refreshPrs();
-  if (result.success) {
-    renderPrList(result.prs);
-  }
+  if (result.success) renderPrList(result.prs);
   refreshBtn.disabled = false;
   refreshBtn.textContent = '↻';
 });
@@ -203,15 +295,19 @@ async function populateSettings() {
   sWebhookPort.value = s.webhookPort || 3847;
   sPollInterval.value = Math.round((s.pollingIntervalMs || 60000) / 1000);
   agentModels = s.agentModels || {};
+  repoConfigs = s.repoConfigs || {};
 
-  // Refresh agent availability
   agents = await window.lgtm.refreshAgents();
   renderAgentConfig(s.defaultAgent || 'claude');
+
+  const conventions = await window.lgtm.getPromptConventions();
+  conventionHint.textContent = `Auto-detected filenames: ${conventions.join(', ')}`;
+  renderRepoConfig();
 }
 
+// ── Agent config (settings) ──────────────────────────────────────
 function renderAgentConfig(defaultAgentId) {
   agentConfigList.innerHTML = '';
-
   agents.forEach((agent) => {
     const row = document.createElement('div');
     row.className = `agent-config-row${agent.available ? '' : ' disabled'}`;
@@ -219,7 +315,6 @@ function renderAgentConfig(defaultAgentId) {
     const header = document.createElement('div');
     header.className = 'agent-config-header';
 
-    // Default radio button
     const radio = document.createElement('input');
     radio.type = 'radio';
     radio.name = 'default-agent';
@@ -233,27 +328,23 @@ function renderAgentConfig(defaultAgentId) {
     label.className = 'agent-config-name';
     label.textContent = agent.name;
 
-    const statusBadge = document.createElement('span');
-    statusBadge.className = `agent-status-badge ${agent.available ? 'installed' : 'missing'}`;
-    statusBadge.textContent = agent.available ? 'installed' : 'not found';
+    const badge = document.createElement('span');
+    badge.className = `agent-status-badge ${agent.available ? 'installed' : 'missing'}`;
+    badge.textContent = agent.available ? 'installed' : 'not found';
 
     header.appendChild(radio);
     header.appendChild(label);
-    header.appendChild(statusBadge);
+    header.appendChild(badge);
 
-    // Model select
     const modelRow = document.createElement('div');
     modelRow.className = 'agent-config-model';
-
     const modelLabel = document.createElement('span');
     modelLabel.className = 'agent-config-model-label';
     modelLabel.textContent = 'Model:';
-
     const modelSelect = document.createElement('select');
     modelSelect.className = 'agent-model-select';
     modelSelect.disabled = !agent.available;
     modelSelect.dataset.agentId = agent.id;
-
     agent.models.forEach((m) => {
       const opt = document.createElement('option');
       opt.value = m.id;
@@ -261,7 +352,6 @@ function renderAgentConfig(defaultAgentId) {
       if (agentModels[agent.id] === m.id) opt.selected = true;
       modelSelect.appendChild(opt);
     });
-
     modelRow.appendChild(modelLabel);
     modelRow.appendChild(modelSelect);
 
@@ -271,16 +361,116 @@ function renderAgentConfig(defaultAgentId) {
   });
 }
 
+// ── Repo prompt config (settings) ────────────────────────────────
+function renderRepoConfig() {
+  repoConfigList.innerHTML = '';
+
+  const repos = Array.from(knownRepos).sort();
+  if (repos.length === 0) {
+    repoConfigList.innerHTML = '<p class="hint">No repos discovered yet. Open PRs will populate this list.</p>';
+    return;
+  }
+
+  repos.forEach((repoKey) => {
+    const existing = repoConfigs[repoKey] || { mode: 'auto' };
+
+    const row = document.createElement('div');
+    row.className = 'repo-config-row';
+
+    // Repo name
+    const nameEl = document.createElement('div');
+    nameEl.className = 'repo-config-name';
+    nameEl.textContent = repoKey;
+
+    // Mode select
+    const controlRow = document.createElement('div');
+    controlRow.className = 'repo-config-controls';
+
+    const modeSelect = document.createElement('select');
+    modeSelect.className = 'repo-mode-select';
+    modeSelect.dataset.repoKey = repoKey;
+
+    [
+      { value: 'auto', label: 'Auto-detect from repo' },
+      { value: 'repo', label: 'Specific file in repo' },
+      { value: 'custom', label: 'Custom local path' },
+    ].forEach((opt) => {
+      const o = document.createElement('option');
+      o.value = opt.value;
+      o.textContent = opt.label;
+      if (existing.mode === opt.value) o.selected = true;
+      modeSelect.appendChild(o);
+    });
+
+    controlRow.appendChild(modeSelect);
+
+    // Conditional input
+    const inputEl = document.createElement('input');
+    inputEl.type = 'text';
+    inputEl.className = 'repo-config-input';
+    inputEl.dataset.repoKey = repoKey;
+
+    if (existing.mode === 'repo') {
+      inputEl.placeholder = 'e.g. NYLE_PR_PROMPT.md';
+      inputEl.value = existing.repoFile || '';
+      inputEl.classList.remove('hidden');
+    } else if (existing.mode === 'custom') {
+      inputEl.placeholder = '/absolute/path/to/prompt.md';
+      inputEl.value = existing.customPath || '';
+      inputEl.classList.remove('hidden');
+    } else {
+      inputEl.classList.add('hidden');
+    }
+
+    modeSelect.addEventListener('change', () => {
+      const mode = modeSelect.value;
+      if (mode === 'auto') {
+        inputEl.classList.add('hidden');
+      } else if (mode === 'repo') {
+        inputEl.placeholder = 'e.g. NYLE_PR_PROMPT.md';
+        inputEl.value = '';
+        inputEl.classList.remove('hidden');
+      } else {
+        inputEl.placeholder = '/absolute/path/to/prompt.md';
+        inputEl.value = '';
+        inputEl.classList.remove('hidden');
+      }
+    });
+
+    controlRow.appendChild(inputEl);
+
+    row.appendChild(nameEl);
+    row.appendChild(controlRow);
+    repoConfigList.appendChild(row);
+  });
+}
+
+// ── Save settings ────────────────────────────────────────────────
 settingsSave.addEventListener('click', async () => {
-  // Gather agent model selections
+  // Agent models
   const newAgentModels = {};
   agentConfigList.querySelectorAll('.agent-model-select').forEach((sel) => {
     newAgentModels[sel.dataset.agentId] = sel.value;
   });
-
-  // Get default agent
   const defaultRadio = agentConfigList.querySelector('input[name="default-agent"]:checked');
   const defaultAgent = defaultRadio ? defaultRadio.value : 'claude';
+
+  // Repo configs
+  const newRepoConfigs = {};
+  repoConfigList.querySelectorAll('.repo-config-row').forEach((row) => {
+    const modeSelect = row.querySelector('.repo-mode-select');
+    const inputEl = row.querySelector('.repo-config-input');
+    const repoKey = modeSelect.dataset.repoKey;
+    const mode = modeSelect.value;
+
+    if (mode === 'auto') {
+      newRepoConfigs[repoKey] = { mode: 'auto' };
+    } else if (mode === 'repo') {
+      newRepoConfigs[repoKey] = { mode: 'repo', repoFile: inputEl.value.trim() };
+    } else {
+      newRepoConfigs[repoKey] = { mode: 'custom', customPath: inputEl.value.trim() };
+    }
+  });
 
   await window.lgtm.saveSettings({
     promptPath: sPromptPath.value.trim(),
@@ -288,13 +478,13 @@ settingsSave.addEventListener('click', async () => {
     pollingIntervalMs: (parseInt(sPollInterval.value) || 60) * 1000,
     defaultAgent,
     agentModels: newAgentModels,
+    repoConfigs: newRepoConfigs,
   });
 
-  // Update local state
   selectedAgent = defaultAgent;
   agentModels = newAgentModels;
+  repoConfigs = newRepoConfigs;
   renderAgentSelect();
-
   showView(prListView);
 });
 
@@ -304,6 +494,7 @@ disconnectBtn.addEventListener('click', async () => {
   if (confirm('Disconnect and remove your PAT from secure storage?')) {
     await window.lgtm.clearPat();
     reviewStatuses = {};
+    knownRepos.clear();
     showView(patSetup);
     subtitleEl.textContent = '';
   }
@@ -311,10 +502,7 @@ disconnectBtn.addEventListener('click', async () => {
 
 // ── IPC listeners ────────────────────────────────────────────────
 window.lgtm.onPrList((prs) => renderPrList(prs));
-
-window.lgtm.onPrError((msg) => {
-  console.error('[LGTM] PR fetch error:', msg);
-});
+window.lgtm.onPrError((msg) => console.error('[LGTM] PR fetch error:', msg));
 
 window.lgtm.onPatStatus(async (status) => {
   if (status.hasPat) {
@@ -327,8 +515,29 @@ window.lgtm.onPatStatus(async (status) => {
 });
 
 window.lgtm.onReviewUpdate((data) => {
-  reviewStatuses[data.key] = { status: data.status, agentId: data.agentId };
+  if (!reviewStatuses[data.key]) reviewStatuses[data.key] = { output: '' };
+  reviewStatuses[data.key].status = data.status;
+  reviewStatuses[data.key].agentId = data.agentId;
   renderPrList(currentPrs);
+
+  // Update detail panel if it's showing this review
+  if (activeDetailKey === data.key) {
+    reviewDetailDot.className = `status-dot ${data.status}`;
+  }
+});
+
+window.lgtm.onReviewOutput((data) => {
+  if (!reviewStatuses[data.key]) reviewStatuses[data.key] = { output: '', status: 'running' };
+  reviewStatuses[data.key].output += data.chunk;
+
+  // Update detail panel if it's showing this review
+  if (activeDetailKey === data.key) {
+    renderMarkdown(reviewStatuses[data.key].output);
+    // Auto-scroll if near bottom
+    const el = reviewOutputEl;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+    if (nearBottom) el.scrollTop = el.scrollHeight;
+  }
 });
 
 window.lgtm.onShowSettings(async () => {
@@ -341,4 +550,11 @@ function esc(str) {
   const el = document.createElement('span');
   el.textContent = str || '';
   return el.innerHTML;
+}
+
+function escHtml(str) {
+  return (str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
