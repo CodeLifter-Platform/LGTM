@@ -9,6 +9,18 @@
 <body>
   <!-- ─── Draggable title bar ─────────────────────────────── -->
   <header id="titlebar">
+    <svg class="logo-icon" viewBox="0 0 1024 1024" width="20" height="20">
+      <defs>
+        <linearGradient id="hdr-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#7B2FBE"/>
+          <stop offset="50%" stop-color="#5B4FD6"/>
+          <stop offset="100%" stop-color="#3A8BF5"/>
+        </linearGradient>
+      </defs>
+      <rect width="1024" height="1024" rx="220" ry="220" fill="url(#hdr-bg)"/>
+      <path d="M240 260h544q60 0 60 60v300q0 60-60 60h-340l-100 100v-100h-104q-60 0-60-60v-300q0-60 60-60Z" fill="white" opacity="0.95"/>
+      <polyline points="370,460 470,560 654,376" fill="none" stroke="url(#hdr-bg)" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
     <span class="logo">LGTM</span>
     <span class="subtitle" id="subtitle"></span>
   </header>

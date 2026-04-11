@@ -35,6 +35,10 @@ html, body {
   background: var(--surface);
   border-bottom: 1px solid var(--border);
 }
+#titlebar .logo-icon {
+  flex-shrink: 0;
+  border-radius: 4px;
+}
 #titlebar .logo {
   font-weight: 700;
   font-size: 15px;
