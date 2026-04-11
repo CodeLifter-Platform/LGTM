@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('lgtm', {
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (s) => ipcRenderer.invoke('save-settings', s),
   getPromptConventions: () => ipcRenderer.invoke('get-prompt-conventions'),
+  getRepoFileTree: (project, repoName) => ipcRenderer.invoke('get-repo-file-tree', { project, repoName }),
+  pickFile: () => ipcRenderer.invoke('pick-file'),
 
   // Events from main → renderer
   onPrList: (cb) => ipcRenderer.on('pr-list', (_e, prs) => cb(prs)),

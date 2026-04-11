@@ -362,6 +362,157 @@ function renderAgentConfig(defaultAgentId) {
 }
 
 // ── Repo prompt config (settings) ────────────────────────────────
+
+// Cache of file trees per repo key
+const repoFileTreeCache = {};
+
+async function fetchRepoFileTree(repoKey) {
+  if (repoFileTreeCache[repoKey]) return repoFileTreeCache[repoKey];
+  const [project, repoName] = repoKey.split('/');
+  const result = await window.lgtm.getRepoFileTree(project, repoName);
+  if (result.success) {
+    repoFileTreeCache[repoKey] = result.files;
+    return result.files;
+  }
+  return [];
+}
+
+function createAutocompleteInput(repoKey, initialValue, placeholder) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'autocomplete-wrapper';
+
+  const inputEl = document.createElement('input');
+  inputEl.type = 'text';
+  inputEl.className = 'repo-config-input';
+  inputEl.dataset.repoKey = repoKey;
+  inputEl.placeholder = placeholder;
+  inputEl.value = initialValue || '';
+  inputEl.autocomplete = 'off';
+
+  const dropdown = document.createElement('div');
+  dropdown.className = 'autocomplete-dropdown hidden';
+
+  let activeIndex = -1;
+
+  async function updateSuggestions() {
+    const query = inputEl.value.toLowerCase();
+    if (!query) { dropdown.classList.add('hidden'); return; }
+
+    const files = await fetchRepoFileTree(repoKey);
+    const matches = files
+      .filter((f) => f.toLowerCase().includes(query))
+      .slice(0, 30);
+
+    if (matches.length === 0) { dropdown.classList.add('hidden'); return; }
+
+    dropdown.innerHTML = '';
+    activeIndex = -1;
+    matches.forEach((filePath, idx) => {
+      const item = document.createElement('div');
+      item.className = 'autocomplete-item';
+
+      // Highlight the matching portion
+      const lowerFile = filePath.toLowerCase();
+      const matchStart = lowerFile.indexOf(query);
+      if (matchStart >= 0) {
+        item.innerHTML =
+          esc(filePath.slice(0, matchStart)) +
+          '<strong>' + esc(filePath.slice(matchStart, matchStart + query.length)) + '</strong>' +
+          esc(filePath.slice(matchStart + query.length));
+      } else {
+        item.textContent = filePath;
+      }
+
+      item.addEventListener('mousedown', (e) => {
+        e.preventDefault();   // prevent blur before click registers
+        inputEl.value = filePath;
+        dropdown.classList.add('hidden');
+      });
+      item.addEventListener('mouseenter', () => {
+        setActive(idx);
+      });
+      dropdown.appendChild(item);
+    });
+    dropdown.classList.remove('hidden');
+  }
+
+  function setActive(idx) {
+    const items = dropdown.querySelectorAll('.autocomplete-item');
+    items.forEach((el) => el.classList.remove('active'));
+    activeIndex = idx;
+    if (idx >= 0 && idx < items.length) items[idx].classList.add('active');
+  }
+
+  let debounceTimer = null;
+  inputEl.addEventListener('input', () => {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(updateSuggestions, 150);
+  });
+
+  inputEl.addEventListener('focus', () => {
+    if (inputEl.value) updateSuggestions();
+  });
+
+  inputEl.addEventListener('blur', () => {
+    // Small delay so mousedown on item fires first
+    setTimeout(() => dropdown.classList.add('hidden'), 120);
+  });
+
+  inputEl.addEventListener('keydown', (e) => {
+    const items = dropdown.querySelectorAll('.autocomplete-item');
+    if (dropdown.classList.contains('hidden') || items.length === 0) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setActive(Math.min(activeIndex + 1, items.length - 1));
+      items[activeIndex]?.scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setActive(Math.max(activeIndex - 1, 0));
+      items[activeIndex]?.scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (activeIndex >= 0 && activeIndex < items.length) {
+        inputEl.value = items[activeIndex].textContent;
+        dropdown.classList.add('hidden');
+      }
+    } else if (e.key === 'Escape') {
+      dropdown.classList.add('hidden');
+    }
+  });
+
+  wrapper.appendChild(inputEl);
+  wrapper.appendChild(dropdown);
+  return wrapper;
+}
+
+function createFilePickerInput(repoKey, initialValue, placeholder) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'file-picker-wrapper';
+
+  const inputEl = document.createElement('input');
+  inputEl.type = 'text';
+  inputEl.className = 'repo-config-input';
+  inputEl.dataset.repoKey = repoKey;
+  inputEl.placeholder = placeholder;
+  inputEl.value = initialValue || '';
+
+  const browseBtn = document.createElement('button');
+  browseBtn.className = 'btn-browse';
+  browseBtn.textContent = 'Browse…';
+  browseBtn.type = 'button';
+  browseBtn.addEventListener('click', async () => {
+    const result = await window.lgtm.pickFile();
+    if (!result.canceled) {
+      inputEl.value = result.filePath;
+    }
+  });
+
+  wrapper.appendChild(inputEl);
+  wrapper.appendChild(browseBtn);
+  return wrapper;
+}
+
 function renderRepoConfig() {
   repoConfigList.innerHTML = '';
 
@@ -404,40 +555,32 @@ function renderRepoConfig() {
 
     controlRow.appendChild(modeSelect);
 
-    // Conditional input
-    const inputEl = document.createElement('input');
-    inputEl.type = 'text';
-    inputEl.className = 'repo-config-input';
-    inputEl.dataset.repoKey = repoKey;
+    // Input container — swapped based on mode
+    const inputContainer = document.createElement('div');
+    inputContainer.className = 'repo-input-container';
 
-    if (existing.mode === 'repo') {
-      inputEl.placeholder = 'e.g. NYLE_PR_PROMPT.md';
-      inputEl.value = existing.repoFile || '';
-      inputEl.classList.remove('hidden');
-    } else if (existing.mode === 'custom') {
-      inputEl.placeholder = '/absolute/path/to/prompt.md';
-      inputEl.value = existing.customPath || '';
-      inputEl.classList.remove('hidden');
-    } else {
-      inputEl.classList.add('hidden');
+    function buildInput(mode, value) {
+      inputContainer.innerHTML = '';
+      if (mode === 'auto') {
+        inputContainer.classList.add('hidden');
+      } else if (mode === 'repo') {
+        inputContainer.classList.remove('hidden');
+        const autocomplete = createAutocompleteInput(repoKey, value, 'Start typing a file path…');
+        inputContainer.appendChild(autocomplete);
+      } else {
+        inputContainer.classList.remove('hidden');
+        const picker = createFilePickerInput(repoKey, value, '/absolute/path/to/prompt.md');
+        inputContainer.appendChild(picker);
+      }
     }
 
+    buildInput(existing.mode, existing.mode === 'repo' ? existing.repoFile : existing.customPath);
+
     modeSelect.addEventListener('change', () => {
-      const mode = modeSelect.value;
-      if (mode === 'auto') {
-        inputEl.classList.add('hidden');
-      } else if (mode === 'repo') {
-        inputEl.placeholder = 'e.g. NYLE_PR_PROMPT.md';
-        inputEl.value = '';
-        inputEl.classList.remove('hidden');
-      } else {
-        inputEl.placeholder = '/absolute/path/to/prompt.md';
-        inputEl.value = '';
-        inputEl.classList.remove('hidden');
-      }
+      buildInput(modeSelect.value, '');
     });
 
-    controlRow.appendChild(inputEl);
+    controlRow.appendChild(inputContainer);
 
     row.appendChild(nameEl);
     row.appendChild(controlRow);
@@ -462,13 +605,14 @@ settingsSave.addEventListener('click', async () => {
     const inputEl = row.querySelector('.repo-config-input');
     const repoKey = modeSelect.dataset.repoKey;
     const mode = modeSelect.value;
+    const inputValue = inputEl ? inputEl.value.trim() : '';
 
     if (mode === 'auto') {
       newRepoConfigs[repoKey] = { mode: 'auto' };
     } else if (mode === 'repo') {
-      newRepoConfigs[repoKey] = { mode: 'repo', repoFile: inputEl.value.trim() };
+      newRepoConfigs[repoKey] = { mode: 'repo', repoFile: inputValue };
     } else {
-      newRepoConfigs[repoKey] = { mode: 'custom', customPath: inputEl.value.trim() };
+      newRepoConfigs[repoKey] = { mode: 'custom', customPath: inputValue };
     }
   });
 

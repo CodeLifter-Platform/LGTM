@@ -172,6 +172,38 @@ class DevOpsClient {
     return res.data.value || [];
   }
 
+  // ── Repo file tree (for autocomplete) ────────────────────────────
+
+  /**
+   * Fetch the full file tree for a repository.
+   * Returns an array of path strings, e.g. [".gitignore", "src/main.js", ...]
+   * Results are cached per project/repo for the lifetime of this client.
+   */
+  async getRepoFileTree(project, repoName) {
+    const cacheKey = `${project}/${repoName}`;
+    if (this._fileTreeCache && this._fileTreeCache[cacheKey]) {
+      return this._fileTreeCache[cacheKey];
+    }
+
+    const res = await this.api.get(
+      `/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repoName)}/items`,
+      {
+        params: {
+          recursionLevel: 'full',
+          'api-version': API_VERSION,
+        },
+      },
+    );
+
+    const items = (res.data.value || [])
+      .filter((item) => !item.isFolder)
+      .map((item) => item.path.replace(/^\//, ''));   // strip leading slash
+
+    if (!this._fileTreeCache) this._fileTreeCache = {};
+    this._fileTreeCache[cacheKey] = items;
+    return items;
+  }
+
   // ── PR Comments ──────────────────────────────────────────────────
 
   /**

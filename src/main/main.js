@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, shell } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, shell, dialog } = require('electron');
 const path = require('path');
 const { PatStore } = require('./pat-store');
 const { DevOpsClient } = require('./devops-client');
@@ -268,4 +268,32 @@ ipcMain.handle('save-settings', async (_event, settings) => {
 
 ipcMain.handle('get-prompt-conventions', () => {
   return PromptResolver.getConventionPaths();
+});
+
+// ── IPC: Repo file tree (for autocomplete) ──────────────────────────
+
+ipcMain.handle('get-repo-file-tree', async (_event, { project, repoName }) => {
+  if (!devopsClient) return { success: false, error: 'Not authenticated', files: [] };
+  try {
+    const files = await devopsClient.getRepoFileTree(project, repoName);
+    return { success: true, files };
+  } catch (err) {
+    console.error(`[LGTM] Failed to fetch file tree for ${project}/${repoName}:`, err.message);
+    return { success: false, error: err.message, files: [] };
+  }
+});
+
+// ── IPC: Native file picker ─────────────────────────────────────────
+
+ipcMain.handle('pick-file', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select a prompt file',
+    properties: ['openFile'],
+    filters: [
+      { name: 'Markdown', extensions: ['md', 'txt', 'markdown'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  });
+  if (result.canceled || !result.filePaths.length) return { canceled: true };
+  return { canceled: false, filePath: result.filePaths[0] };
 });
