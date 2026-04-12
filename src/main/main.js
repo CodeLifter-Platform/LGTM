@@ -65,10 +65,16 @@ app.on('window-all-closed', (e) => e.preventDefault());
 
 // ── Tray ─────────────────────────────────────────────────────────────
 function createTray() {
-  const iconPath = path.join(__dirname, '..', 'assets', 'tray-iconTemplate.png');
+  // macOS uses "Template" images (monochrome, auto-themed by the OS).
+  // Windows needs a full-colour .ico for the system tray.
+  const iconFile = process.platform === 'darwin'
+    ? 'tray-iconTemplate.png'
+    : 'tray-icon-win.png';
+  const iconPath = path.join(__dirname, '..', 'assets', iconFile);
   let icon;
   try { icon = nativeImage.createFromPath(iconPath); }
   catch { icon = nativeImage.createEmpty(); }
+  if (process.platform === 'win32') icon = icon.resize({ width: 16, height: 16 });
   tray = new Tray(icon);
   tray.setToolTip('LGTM — PR Reviewer');
   tray.on('click', toggleWindow);
