@@ -74,6 +74,11 @@ jobs:
     needs: [build-mac, build-windows]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
       - name: Download macOS artifacts
         uses: actions/download-artifact@v4
         with:
@@ -88,6 +93,40 @@ jobs:
 
       - name: List release files
         run: ls -lhR dist/
+
+      - name: Collect asset filenames
+        id: assets
+        run: |
+          DMG=$(ls dist/*.dmg | head -1 | xargs basename)
+          ZIP=$(ls dist/*mac*.zip 2>/dev/null | head -1 | xargs basename || ls dist/*.zip | head -1 | xargs basename)
+          SETUP=$(ls dist/*Setup*.exe 2>/dev/null | head -1 | xargs basename || ls dist/*setup*.exe | head -1 | xargs basename)
+          PORTABLE=$(ls dist/*.exe | grep -v -i setup | head -1 | xargs basename)
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "setup=$SETUP" >> "$GITHUB_OUTPUT"
+          echo "portable=$PORTABLE" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Update README download links
+        run: |
+          TAG="${{ steps.assets.outputs.tag }}"
+          DMG="${{ steps.assets.outputs.dmg }}"
+          ZIP="${{ steps.assets.outputs.zip }}"
+          SETUP="${{ steps.assets.outputs.setup }}"
+          PORTABLE="${{ steps.assets.outputs.portable }}"
+          BASE="https://github.com/CodeLifterIO/LGTM/releases/download/${TAG}"
+
+          sed -i "s|.*\*\*macOS\*\*.*|| **macOS** | [${DMG}](${BASE}/${DMG}) | [${ZIP}](${BASE}/${ZIP}) |" README.md
+          sed -i "s|.*\*\*Windows\*\*.*|| **Windows** | [${SETUP}](${BASE}/${SETUP}) | [${PORTABLE}](${BASE}/${PORTABLE}) |" README.md
+
+      - name: Commit README update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git diff --cached --quiet || git commit -m "Update README download links for ${{ steps.assets.outputs.tag }}"
+          git push origin main
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
