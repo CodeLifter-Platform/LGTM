@@ -155,7 +155,7 @@ jobs:
           RELEASE_DATE=$(date -u +"%Y-%m-%d")
           REPO_URL="https://github.com/CodeLifterIO/LGTM"
           NEW_ROW="| ${VERSION_TAG} | ${RELEASE_DATE} | [dmg](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-arm64.dmg) · [zip](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-arm64.zip) | [installer](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-Setup.exe) · [portable](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-Portable.exe) | [Release notes](${REPO_URL}/releases/tag/${VERSION_TAG}) |"
-          sed -i "s|<!-- RELEASE_TABLE_MARKER -->|${NEW_ROW}\n<!-- RELEASE_TABLE_MARKER -->|" README.md
+          awk -v row="$NEW_ROW" '/<!-- RELEASE_TABLE_MARKER -->/{print row} {print}' README.md > README.tmp && mv README.tmp README.md
 
       - name: Commit version bump
         run: |
