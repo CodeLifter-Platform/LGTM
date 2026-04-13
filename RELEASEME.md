@@ -2,7 +2,7 @@
 
 ## Automatic Releases (Default)
 
-Just push to `main` using conventional commit messages. The pipeline handles everything:
+Just push to `main` using conventional commit messages. This is handled while merging the PR. The pipeline handles everything:
 
 ```bash
 git commit -m "feat: add dark mode toggle"
