@@ -9,7 +9,7 @@ A cross-platform menu bar app that lists your open Azure DevOps pull requests an
 
 | Platform | Installer | Portable |
 |----------|-----------|----------|
-| **macOS** | [LGTM.dmg](https://github.com/CodeLifterIO/LGTM/releases/latest/download/LGTM.dmg) | [LGTM-mac.zip](https://github.com/CodeLifterIO/LGTM/releases/latest/download/LGTM-mac.zip) |
+| **macOS** | [LGTM-arm64.dmg](https://github.com/CodeLifterIO/LGTM/releases/latest/download/LGTM-arm64.dmg) | [LGTM-arm64.zip](https://github.com/CodeLifterIO/LGTM/releases/latest/download/LGTM-arm64.zip) |
 | **Windows** | [LGTM-Setup.exe](https://github.com/CodeLifterIO/LGTM/releases/latest/download/LGTM-Setup.exe) | [LGTM-Portable.exe](https://github.com/CodeLifterIO/LGTM/releases/latest/download/LGTM-Portable.exe) |
 
 > **Note:** The app is not code-signed yet. On macOS, right-click → Open to bypass Gatekeeper. On Windows, click "More info" → "Run anyway" in SmartScreen.
@@ -76,9 +76,9 @@ When starting a review, the prompt is resolved in this order:
 
 1. **Custom local path** — an absolute path on your machine configured per-repo in settings
 2. **Specific repo file** — a file path within the repo configured per-repo (with autocomplete)
-3. **Convention auto-detect** — scans the cloned repo for: `NYLE_PR_PROMPT.md`, `.lgtm/review-prompt.md`, `.github/pr-review-prompt.md`, `PR_REVIEW_PROMPT.md`
+3. **Convention auto-detect** — scans the cloned repo for: `.lgtm/review-prompt.md`, `.github/pr-review-prompt.md`, `PR_REVIEW_PROMPT.md`, `NYLE_PR_PROMPT.md`
 4. **Global custom path** — the global prompt path from settings
-5. **Bundled default** — `resources/NYLE_PR_PROMPT.md` shipped with the app
+5. **Bundled default** — `resources/REPO_REVIEW_TEMPLATE.md` shipped with the app
 
 ## Architecture
 

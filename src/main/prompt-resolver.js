@@ -1,26 +1,29 @@
 /**
- * PromptResolver — Resolves the review prompt file for a given PR/repo.
+ * PromptResolver — Resolves the repo-specific review prompt (Layer B) for a PR.
+ *
+ * This is the project-context prompt that gets appended AFTER the universal
+ * LGTM review rules (Layer A, loaded by AgentRunner).
  *
  * Resolution order:
  *   1. Per-repo custom path (from settings.repoConfigs)
  *   2. Convention-based discovery in the cloned repo
- *   3. Global fallback (bundled or user-configured)
+ *   3. Global fallback (bundled REPO_REVIEW_TEMPLATE.md)
  *
  * Convention filenames searched in order:
- *   - NYLE_PR_PROMPT.md
  *   - .lgtm/review-prompt.md
  *   - .github/pr-review-prompt.md
  *   - PR_REVIEW_PROMPT.md
+ *   - NYLE_PR_PROMPT.md  (legacy — kept for backwards compatibility)
  */
 
 const path = require('path');
 const fs = require('fs');
 
 const CONVENTION_PATHS = [
-  'NYLE_PR_PROMPT.md',
   '.lgtm/review-prompt.md',
   '.github/pr-review-prompt.md',
   'PR_REVIEW_PROMPT.md',
+  'NYLE_PR_PROMPT.md',
 ];
 
 class PromptResolver {
@@ -64,6 +67,8 @@ class PromptResolver {
       }
     }
 
+    // No custom config — fall through to convention scan, then bundled REPO_REVIEW_TEMPLATE.md
+
     // ── 2. Convention-based discovery in cloned repo ────────────
     if (clonePath) {
       for (const relPath of CONVENTION_PATHS) {
@@ -82,10 +87,10 @@ class PromptResolver {
       return { path: globalCustom, source: 'global-custom' };
     }
 
-    // Bundled default
+    // Bundled default (repo-specific template)
     const bundled = path.join(
       process.resourcesPath || path.join(__dirname, '..', '..', 'resources'),
-      'NYLE_PR_PROMPT.md',
+      'REPO_REVIEW_TEMPLATE.md',
     );
     if (fs.existsSync(bundled)) {
       console.log(`[LGTM] Prompt for ${repoKey}: bundled default`);

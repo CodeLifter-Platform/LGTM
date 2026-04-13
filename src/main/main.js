@@ -27,6 +27,8 @@ const config = new ElectronStore({
     defaultAgent: 'claude',
     agentModels: {},          // { agentId: selectedModelId }
     repoConfigs: {},          // { "project/repo": { mode, repoFile, customPath } }
+    starredRepos: [],         // ["project/repo", ...] — starred repos are reviewed first
+    maxPrAgeDays: 7,          // only auto-review PRs created within this many days
   },
 });
 
@@ -258,6 +260,8 @@ ipcMain.handle('get-settings', () => ({
   defaultAgent: config.get('defaultAgent'),
   agentModels: config.get('agentModels'),
   repoConfigs: config.get('repoConfigs'),
+  starredRepos: config.get('starredRepos'),
+  maxPrAgeDays: config.get('maxPrAgeDays'),
 }));
 
 ipcMain.handle('save-settings', async (_event, settings) => {
@@ -267,6 +271,8 @@ ipcMain.handle('save-settings', async (_event, settings) => {
   if (settings.defaultAgent !== undefined) config.set('defaultAgent', settings.defaultAgent);
   if (settings.agentModels !== undefined) config.set('agentModels', settings.agentModels);
   if (settings.repoConfigs !== undefined) config.set('repoConfigs', settings.repoConfigs);
+  if (settings.starredRepos !== undefined) config.set('starredRepos', settings.starredRepos);
+  if (settings.maxPrAgeDays !== undefined) config.set('maxPrAgeDays', settings.maxPrAgeDays);
   return { success: true };
 });
 

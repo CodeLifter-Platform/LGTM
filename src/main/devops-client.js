@@ -235,6 +235,32 @@ class DevOpsClient {
     return res.data;
   }
 
+  // ── PR Threads (for re-review awareness) ─────────────────────────
+
+  /**
+   * Fetch all comment threads on a PR, including their status.
+   * Returns an array of { id, status, comments: [{ content, author }] }.
+   * Status: 1=active, 2=fixed, 3=wontFix, 4=closed, 5=byDesign, 6=pending
+   */
+  async getPrThreads(project, repoId, prId) {
+    const res = await this.api.get(
+      `/${encodeURIComponent(project)}/_apis/git/repositories/${repoId}/pullrequests/${prId}/threads`,
+      { params: { 'api-version': API_VERSION } },
+    );
+    const threads = (res.data.value || []).map((t) => ({
+      id: t.id,
+      status: t.status,                   // 1=active, 2=fixed, etc.
+      isDeleted: t.isDeleted || false,
+      publishedDate: t.publishedDate,
+      comments: (t.comments || []).map((c) => ({
+        content: c.content,
+        author: c.author?.displayName || '',
+        commentType: c.commentType,        // 1=text, 2=system
+      })),
+    }));
+    return threads;
+  }
+
   // ── Helpers ──────────────────────────────────────────────────────
   _reviewStatus(pr) {
     // Check reviewer votes

@@ -39,6 +39,15 @@ function getEnhancedPath() {
 // Apply the enhanced PATH to the process so child_process.spawn also sees it
 process.env.PATH = getEnhancedPath();
 
+/**
+ * Agent definitions.
+ *
+ * `buildCmd` now returns { command, args, stdinPrompt } where:
+ *   - command/args do NOT contain the prompt text (avoids shell escaping issues)
+ *   - stdinPrompt: boolean — if true, the prompt should be piped via stdin
+ *
+ * The AgentRunner writes the prompt to a temp file and handles piping.
+ */
 const AGENTS = [
   {
     id: 'claude',
@@ -48,10 +57,12 @@ const AGENTS = [
       { id: 'claude-opus-4-6',   label: 'Claude Opus 4.6' },
       { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
     ],
-    buildCmd: (prompt, model) => {
-      const args = ['--print', '--prompt', prompt];
+    // claude -p "prompt" OR echo "prompt" | claude -p
+    // Using stdin piping to avoid shell escaping issues with large prompts
+    buildCmd: (_prompt, model) => {
+      const args = ['-p', '--verbose'];
       if (model) args.push('--model', model);
-      return { command: 'claude', args };
+      return { command: 'claude', args, stdinPrompt: true };
     },
   },
   {
@@ -63,10 +74,10 @@ const AGENTS = [
       { id: 'o3',         label: 'o3' },
       { id: 'gpt-4.1',    label: 'GPT-4.1' },
     ],
-    buildCmd: (prompt, model) => {
-      const args = ['--quiet', '--prompt', prompt];
+    buildCmd: (_prompt, model) => {
+      const args = ['--quiet'];
       if (model) args.push('--model', model);
-      return { command: 'codex', args };
+      return { command: 'codex', args, stdinPrompt: true };
     },
   },
   {
@@ -81,11 +92,11 @@ const AGENTS = [
       { id: 'o4-mini',    label: 'o4-mini' },
       { id: 'o3',         label: 'o3' },
     ],
-    buildCmd: (prompt, model, resolvedCli) => {
+    buildCmd: (_prompt, model, resolvedCli) => {
       const cmd = resolvedCli || 'auggie';
-      const args = ['run', '--prompt', prompt];
+      const args = ['run'];
       if (model && model !== 'default') args.push('--model', model);
-      return { command: cmd, args };
+      return { command: cmd, args, stdinPrompt: true };
     },
   },
 ];

@@ -2,17 +2,68 @@ name: Build & Release
 
 on:
   push:
-    tags:
-      - 'v*'          # Trigger on version tags: v1.0.0, v1.2.3-beta, etc.
-  workflow_dispatch:    # Allow manual trigger from GitHub UI
+    branches: ['**']       # Build on all branch pushes
+  pull_request:
+    branches: [main]       # Build on PRs targeting main
+  workflow_dispatch:        # Allow manual trigger
 
 permissions:
-  contents: write      # Needed to create releases and upload assets
+  contents: write          # Needed to create releases, tags, and push version commits
+
+# ── Version strategy ──────────────────────────────────────────────
+#
+#   MAJOR  → GitHub Actions variable "MAJOR_VERSION" (default: 1)
+#            Bump manually in repo Settings → Variables → Actions
+#   MINOR  → GITHUB_RUN_NUMBER (auto-increments every workflow run)
+#   PATCH  → always 0
+#
+#   main branch:    1.42.0          (clean release)
+#   other branches: 1.42.0-pre.87+abc1234  (prerelease)
+#
+# To start a new major version:
+#   1. Go to Settings → Secrets and variables → Actions → Variables
+#   2. Set MAJOR_VERSION to the new number (e.g., 2)
+#   3. Next push to main becomes 2.43.0
+# ──────────────────────────────────────────────────────────────────
 
 jobs:
-  # ── macOS build ──────────────────────────────────────────────────
+  # ── Generate version number ────────────────────────────────────
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.semver.outputs.version }}
+      version_tag: ${{ steps.semver.outputs.version_tag }}
+      is_release: ${{ steps.semver.outputs.is_release }}
+    steps:
+      - name: Generate semantic version
+        id: semver
+        run: |
+          MAJOR="${{ vars.MAJOR_VERSION || '1' }}"
+          MINOR="${{ github.run_number }}"
+          PATCH="0"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          IS_MAIN="${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}"
+
+          if [ "$IS_MAIN" = "true" ]; then
+            VERSION="${MAJOR}.${MINOR}.${PATCH}"
+            IS_RELEASE="true"
+          else
+            VERSION="${MAJOR}.${MINOR}.${PATCH}-pre.${GITHUB_RUN_NUMBER}+${SHORT_SHA}"
+            IS_RELEASE="false"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "is_release=$IS_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "### Version: \`${VERSION}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Release: ${IS_RELEASE}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── macOS build ────────────────────────────────────────────────
   build-mac:
+    needs: version
     runs-on: macos-latest
+    env:
+      APP_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,10 +77,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Stamp version into package.json
+        run: npm version "$APP_VERSION" --no-git-tag-version --allow-same-version
+
       - name: Build macOS installer
-        run: npm run build:mac
+        run: npx electron-builder --mac --publish never
         env:
-          # For unsigned builds, skip notarization
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
       - name: Upload macOS artifacts
@@ -41,9 +94,12 @@ jobs:
             dist/*.zip
           if-no-files-found: error
 
-  # ── Windows build ────────────────────────────────────────────────
+  # ── Windows build ──────────────────────────────────────────────
   build-windows:
+    needs: version
     runs-on: windows-latest
+    env:
+      APP_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -57,8 +113,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Stamp version into package.json
+        run: npm version "$env:APP_VERSION" --no-git-tag-version --allow-same-version
+        shell: pwsh
+
       - name: Build Windows installer
-        run: npm run build:win
+        run: npx electron-builder --win --publish never
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -68,16 +128,36 @@ jobs:
             dist/*.exe
           if-no-files-found: error
 
-  # ── Create GitHub Release (only on tag push) ─────────────────────
+  # ── Release (main branch only) ─────────────────────────────────
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-mac, build-windows]
+    if: needs.version.outputs.is_release == 'true'
+    needs: [version, build-mac, build-windows]
     runs-on: ubuntu-latest
+    env:
+      APP_VERSION: ${{ needs.version.outputs.version }}
+      VERSION_TAG: ${{ needs.version.outputs.version_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Stamp version into package.json
+        run: npm version "$APP_VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git diff --cached --quiet || git commit -m "chore: bump version to ${APP_VERSION} [skip ci]"
+          git tag "$VERSION_TAG"
+          git push origin main --tags
 
       - name: Download macOS artifacts
         uses: actions/download-artifact@v4
@@ -94,43 +174,11 @@ jobs:
       - name: List release files
         run: ls -lhR dist/
 
-      - name: Collect asset filenames
-        id: assets
-        run: |
-          DMG=$(ls dist/*.dmg | head -1 | xargs basename)
-          ZIP=$(ls dist/*mac*.zip 2>/dev/null | head -1 | xargs basename || ls dist/*.zip | head -1 | xargs basename)
-          SETUP=$(ls dist/*Setup*.exe 2>/dev/null | head -1 | xargs basename || ls dist/*setup*.exe | head -1 | xargs basename)
-          PORTABLE=$(ls dist/*.exe | grep -v -i setup | head -1 | xargs basename)
-          TAG="${GITHUB_REF#refs/tags/}"
-          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
-          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
-          echo "setup=$SETUP" >> "$GITHUB_OUTPUT"
-          echo "portable=$PORTABLE" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Update README download links
-        run: |
-          TAG="${{ steps.assets.outputs.tag }}"
-          DMG="${{ steps.assets.outputs.dmg }}"
-          ZIP="${{ steps.assets.outputs.zip }}"
-          SETUP="${{ steps.assets.outputs.setup }}"
-          PORTABLE="${{ steps.assets.outputs.portable }}"
-          BASE="https://github.com/CodeLifterIO/LGTM/releases/download/${TAG}"
-
-          sed -i "s|.*\*\*macOS\*\*.*|| **macOS** | [${DMG}](${BASE}/${DMG}) | [${ZIP}](${BASE}/${ZIP}) |" README.md
-          sed -i "s|.*\*\*Windows\*\*.*|| **Windows** | [${SETUP}](${BASE}/${SETUP}) | [${PORTABLE}](${BASE}/${PORTABLE}) |" README.md
-
-      - name: Commit README update
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add README.md
-          git diff --cached --quiet || git commit -m "Update README download links for ${{ steps.assets.outputs.tag }}"
-          git push origin main
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.VERSION_TAG }}
+          name: "LGTM ${{ env.VERSION_TAG }}"
           draft: true
           generate_release_notes: true
           files: |

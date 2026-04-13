@@ -12,16 +12,20 @@
 const { spawn } = require('child_process');
 const { BrowserWindow } = require('electron');
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { AgentRegistry } = require('./agent-registry');
 const { RepoCloner } = require('./repo-cloner');
 const { PromptResolver } = require('./prompt-resolver');
+const { DevOpsClient } = require('./devops-client');
 
 class AgentRunner {
   constructor(config) {
     this.config = config;
     this.registry = new AgentRegistry();
     this.promptResolver = new PromptResolver(config);
-    this.cloner = null; // initialised once we have a PAT
+    this.cloner = null;       // initialised once we have a PAT
+    this.devopsClient = null;  // for fetching existing threads
     this.activeReviews = new Map(); // key → review object
   }
 
@@ -30,6 +34,7 @@ class AgentRunner {
    */
   setCredentials(pat, orgUrl) {
     this.cloner = new RepoCloner(pat, orgUrl);
+    this.devopsClient = new DevOpsClient(pat, orgUrl);
   }
 
   /**
@@ -75,54 +80,127 @@ class AgentRunner {
       review.cleanup = cleanup;
       review.clonePath = clonePath;
 
-      // ── Step 2: Resolve the prompt ─────────────────────────
-      const { path: promptPath, source: promptSource } = this.promptResolver.resolve(pr, clonePath);
+      // ── Step 2: Build the review prompt ───────────────────────
 
-      let promptInstruction = '';
-      if (promptPath) {
-        // Read the prompt content and include it inline so the agent
-        // has it regardless of whether it can access the file path
+      // Layer A: LGTM universal review prompt (severity system, comment format, re-review rules)
+      const universalPromptPath = path.join(__dirname, '..', '..', 'resources', 'LGTM_REVIEW_PROMPT.md');
+      let universalPrompt = '';
+      try {
+        universalPrompt = fs.readFileSync(universalPromptPath, 'utf8');
+      } catch {
+        // Fallback: try the extraResources path (in packaged app)
         try {
-          const promptContent = fs.readFileSync(promptPath, 'utf8');
-          promptInstruction = `\n\nUse the following review guidelines:\n\n${promptContent}`;
-          review.promptSource = promptSource;
+          const packagedPath = path.join(process.resourcesPath, 'LGTM_REVIEW_PROMPT.md');
+          universalPrompt = fs.readFileSync(packagedPath, 'utf8');
         } catch {
-          promptInstruction = `\nReview prompt file found at ${promptPath} but could not be read. Use your best judgement.`;
+          console.warn('[LGTM] Could not load LGTM_REVIEW_PROMPT.md — using minimal fallback');
+          universalPrompt = '';
         }
-      } else {
-        promptInstruction = '\nNo project-specific review prompt found. Use your best judgement for a thorough code review.';
-        review.promptSource = 'none';
+      }
+
+      // Layer B: Repo-specific prompt (project context, custom rules)
+      const { path: repoPromptPath, source: promptSource } = this.promptResolver.resolve(pr, clonePath);
+      let repoPrompt = '';
+      review.promptSource = promptSource;
+
+      if (repoPromptPath) {
+        try {
+          repoPrompt = fs.readFileSync(repoPromptPath, 'utf8');
+        } catch {
+          console.warn(`[LGTM] Could not read repo prompt at ${repoPromptPath}`);
+        }
+      }
+
+      // Fetch existing PR threads for re-review awareness
+      let existingThreadsSummary = '';
+      try {
+        const threads = await this.devopsClient.getPrThreads(pr.project, pr.repoId, pr.id);
+        const reviewThreads = threads.filter((t) =>
+          t.comments.length > 0 && t.comments[0].commentType === 1
+        );
+
+        if (reviewThreads.length > 0) {
+          const threadLines = reviewThreads.map((t) => {
+            const statusMap = { 1: 'Active', 2: 'Fixed', 3: 'WontFix', 4: 'Closed', 5: 'ByDesign', 6: 'Pending' };
+            const status = statusMap[t.status] || `Unknown(${t.status})`;
+            const firstComment = t.comments[0].content.substring(0, 200);
+            return `- Thread #${t.id} [${status}]: ${firstComment}${t.comments[0].content.length > 200 ? '…' : ''}`;
+          });
+          existingThreadsSummary = [
+            '\n## Existing Review Threads',
+            '',
+            'The following review comments already exist on this PR. Follow the re-review rules strictly:',
+            '',
+            ...threadLines,
+          ].join('\n');
+        }
+      } catch (err) {
+        console.warn(`[LGTM] Could not fetch existing threads: ${err.message}`);
       }
 
       const sourceBranch = pr.sourceBranch.replace('refs/heads/', '');
       const targetBranch = pr.targetBranch.replace('refs/heads/', '');
 
-      const prompt = [
+      const promptParts = [
         `You are reviewing PR #${pr.id} "${pr.title}" in the Azure DevOps repo "${pr.repo}" (project "${pr.project}").`,
         `The branch "${sourceBranch}" is being merged into "${targetBranch}".`,
         `You have the full codebase available in your working directory.`,
         `Run \`git diff ${targetBranch}...${sourceBranch}\` to see what changed.`,
         `Review the diff in the context of the full codebase.`,
-        `Post your review comments directly into the PR in Azure DevOps.`,
+        `Post your review comments directly as threads in the Azure DevOps PR.`,
         `The PR URL is: ${pr.webUrl}`,
-        promptInstruction,
-      ].join('\n');
+      ];
+
+      if (universalPrompt) {
+        promptParts.push('\n--- LGTM REVIEW RULES ---\n');
+        promptParts.push(universalPrompt);
+      }
+
+      if (repoPrompt) {
+        promptParts.push('\n--- PROJECT-SPECIFIC RULES ---\n');
+        promptParts.push(repoPrompt);
+      }
+
+      if (existingThreadsSummary) {
+        promptParts.push(existingThreadsSummary);
+      }
+
+      const prompt = promptParts.join('\n');
 
       // ── Step 3: Spawn the agent ────────────────────────────
       review.status = 'running';
       this._notifyRenderer(key, review);
 
-      const { command, args } = this.registry.buildCommand(agentId, prompt, model);
+      const { command, args, stdinPrompt } = this.registry.buildCommand(agentId, prompt, model);
 
       console.log(`[LGTM] Launching ${agentId} in ${clonePath}`);
-      console.log(`[LGTM]   Command: ${command} ${args.slice(0, 2).join(' ')} ...`);
+      console.log(`[LGTM]   Command: ${command} ${args.join(' ')}`);
+      console.log(`[LGTM]   Prompt length: ${prompt.length} chars, stdin: ${!!stdinPrompt}`);
+
+      // Write prompt to a temp file so we can pipe it via stdin.
+      // This avoids shell escaping issues with large prompts containing
+      // special characters (pipes, backticks, quotes, etc.)
+      const promptFile = path.join(os.tmpdir(), `lgtm-prompt-${Date.now()}.txt`);
+      fs.writeFileSync(promptFile, prompt, 'utf8');
 
       const child = spawn(command, args, {
         cwd: clonePath,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        shell: true,
+        stdio: [stdinPrompt ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+        shell: false,
         env: { ...process.env },
       });
+
+      // Pipe the prompt via stdin then close it
+      if (stdinPrompt && child.stdin) {
+        const promptStream = fs.createReadStream(promptFile);
+        promptStream.pipe(child.stdin);
+        promptStream.on('end', () => {
+          // Clean up temp file after it's been read
+          try { fs.unlinkSync(promptFile); } catch { /* ignore */ }
+        });
+      } else {
+        try { fs.unlinkSync(promptFile); } catch { /* ignore */ }
+      }
 
       // ── Step 4: Stream output ──────────────────────────────
       child.stdout.on('data', (data) => {

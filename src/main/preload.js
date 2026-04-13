@@ -22,6 +22,10 @@ contextBridge.exposeInMainWorld('lgtm', {
   getRepoFileTree: (project, repoName) => ipcRenderer.invoke('get-repo-file-tree', { project, repoName }),
   pickFile: () => ipcRenderer.invoke('pick-file'),
 
+  // Starred repos
+  getStarredRepos: () => ipcRenderer.invoke('get-settings').then((s) => s.starredRepos || []),
+  saveStarredRepos: (repos) => ipcRenderer.invoke('save-settings', { starredRepos: repos }),
+
   // Events from main → renderer
   onPrList: (cb) => ipcRenderer.on('pr-list', (_e, prs) => cb(prs)),
   onPrError: (cb) => ipcRenderer.on('pr-error', (_e, msg) => cb(msg)),

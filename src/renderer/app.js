@@ -32,6 +32,7 @@ const reviewOutputEl    = $('#review-output');
 const sPromptPath       = $('#s-prompt-path');
 const sWebhookPort      = $('#s-webhook-port');
 const sPollInterval     = $('#s-poll-interval');
+const sMaxPrAge         = $('#s-max-pr-age');
 const agentConfigList   = $('#agent-config-list');
 const repoConfigList    = $('#repo-config-list');
 const conventionHint    = $('#convention-hint');
@@ -47,8 +48,11 @@ let agents = [];
 let selectedAgent = null;
 let agentModels = {};
 let repoConfigs = {};
+let starredRepos = new Set(); // "project/repo" strings — starred repos float to top & auto-review first
+let maxPrAgeDays = 7;        // only auto-review PRs within this age
 let activeDetailKey = null;  // which review is shown in the detail panel
 let knownRepos = new Set();  // "project/repo" strings from PR list
+let autoReviewRunning = false;
 
 // ── Navigation ───────────────────────────────────────────────────
 function showView(view) {
@@ -63,6 +67,8 @@ async function loadAgents() {
   selectedAgent = settings.defaultAgent || 'claude';
   agentModels = settings.agentModels || {};
   repoConfigs = settings.repoConfigs || {};
+  starredRepos = new Set(settings.starredRepos || []);
+  maxPrAgeDays = settings.maxPrAgeDays || 7;
   renderAgentSelect();
 }
 
@@ -129,6 +135,9 @@ function setPatMsg(msg, type = '') {
 }
 
 // ── PR list rendering ────────────────────────────────────────────
+let collapsedRepos = {};  // repoKey → boolean (true = collapsed)
+let openConfigPopover = null; // currently open popover element
+
 function renderPrList(prs) {
   currentPrs = prs;
   prListEl.innerHTML = '';
@@ -145,67 +154,363 @@ function renderPrList(prs) {
   prListEl.classList.remove('hidden');
   noPrsEl.classList.add('hidden');
 
+  // Group PRs by repo
+  const grouped = {};
   prs.forEach((pr) => {
-    const key = `${pr.project}/${pr.repo}/${pr.id}`;
-    const review = reviewStatuses[key];
-    const reviewStatus = review ? review.status : null;
-    const reviewAgent = review ? review.agentId : null;
-    const dotClass = reviewStatus || pr.reviewStatus || 'pending';
+    const repoKey = `${pr.project}/${pr.repo}`;
+    if (!grouped[repoKey]) grouped[repoKey] = [];
+    grouped[repoKey].push(pr);
+  });
 
-    const item = document.createElement('div');
-    item.className = 'pr-item';
+  // Sort: starred repos first, then alphabetical within each group
+  const repoKeys = Object.keys(grouped).sort((a, b) => {
+    const aStarred = starredRepos.has(a) ? 0 : 1;
+    const bStarred = starredRepos.has(b) ? 0 : 1;
+    if (aStarred !== bStarred) return aStarred - bStarred;
+    return a.localeCompare(b);
+  });
 
-    // Status dot
-    const dot = document.createElement('div');
-    dot.className = `status-dot ${dotClass}`;
-    dot.title = dotClass;
+  // Render each repo group
+  repoKeys.forEach((repoKey) => {
+    const repoPrs = grouped[repoKey];
+    const isCollapsed = collapsedRepos[repoKey] || false;
+    const cfg = repoConfigs[repoKey] || { mode: 'default' };
+    const isStarred = starredRepos.has(repoKey);
 
-    // Info
-    const info = document.createElement('div');
-    info.className = 'pr-info';
-    info.innerHTML = `
-      <div class="pr-path">${esc(pr.repo)}/${pr.id}/${esc(pr.title)}</div>
-      <div class="pr-title">by ${esc(pr.createdBy)} · ${esc(pr.project)}</div>
-    `;
+    // ── Group header ──────────────────────────────────
+    const header = document.createElement('div');
+    header.className = `repo-group-header${isStarred ? ' starred' : ''}`;
 
-    // Badge + view button for active reviews
-    const actions = document.createElement('div');
-    actions.className = 'pr-actions';
-
-    if (reviewStatus) {
-      const badge = document.createElement('span');
-      badge.className = `pr-review-badge ${reviewStatus}`;
-      badge.textContent = reviewStatus === 'cloning' ? 'cloning…' : reviewStatus;
-      actions.appendChild(badge);
-
-      if (reviewStatus === 'running' || reviewStatus === 'completed' || reviewStatus === 'failed' || reviewStatus === 'cloning') {
-        const viewBtn = document.createElement('button');
-        viewBtn.className = 'btn-view-review';
-        viewBtn.textContent = '▸';
-        viewBtn.title = 'View review output';
-        viewBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          openReviewDetail(key, pr, reviewStatus, reviewAgent);
-        });
-        actions.appendChild(viewBtn);
-      }
-    }
-
-    item.appendChild(dot);
-    item.appendChild(info);
-    item.appendChild(actions);
-
-    // Click to start review (only if not already running)
-    item.addEventListener('click', () => {
-      if (reviewStatus === 'running' || reviewStatus === 'cloning') {
-        openReviewDetail(key, pr, reviewStatus, reviewAgent);
-      } else {
-        startReview(pr);
-      }
+    // Star button
+    const starBtn = document.createElement('button');
+    starBtn.className = `repo-star-btn${isStarred ? ' active' : ''}`;
+    starBtn.innerHTML = isStarred ? '&#9733;' : '&#9734;';  // ★ / ☆
+    starBtn.title = isStarred ? 'Unstar repo (removes from auto-review priority)' : 'Star repo (auto-review priority)';
+    starBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleStar(repoKey);
     });
 
-    prListEl.appendChild(item);
+    const chevron = document.createElement('span');
+    chevron.className = `repo-chevron${isCollapsed ? ' collapsed' : ''}`;
+    chevron.textContent = '\u25BE';  // ▾
+
+    const repoName = document.createElement('span');
+    repoName.className = 'repo-group-name';
+    repoName.textContent = repoKey;
+
+    const prCount = document.createElement('span');
+    prCount.className = 'repo-group-count';
+    prCount.textContent = repoPrs.length;
+
+    // Custom prompt indicator (only shown when a repo file is configured)
+    const customIndicator = document.createElement('span');
+    customIndicator.className = 'repo-prompt-indicator';
+    if (cfg.mode === 'repo' && cfg.repoFile) {
+      customIndicator.textContent = cfg.repoFile.split('/').pop();  // show just filename
+      customIndicator.title = `Custom prompt: ${cfg.repoFile}`;
+    }
+
+    const spacer = document.createElement('div');
+    spacer.style.flex = '1';
+
+    // Gear button
+    const gearBtn = document.createElement('button');
+    gearBtn.className = 'repo-gear-btn';
+    gearBtn.innerHTML = '&#9881;';  // ⚙
+    gearBtn.title = 'Set a custom review prompt from this repo';
+    gearBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleRepoConfigPopover(repoKey, gearBtn);
+    });
+
+    header.appendChild(starBtn);
+    header.appendChild(chevron);
+    header.appendChild(repoName);
+    header.appendChild(prCount);
+    header.appendChild(customIndicator);
+    header.appendChild(spacer);
+    header.appendChild(gearBtn);
+
+    // Toggle collapse on header click (but not gear)
+    header.addEventListener('click', () => {
+      collapsedRepos[repoKey] = !collapsedRepos[repoKey];
+      renderPrList(currentPrs);
+    });
+
+    prListEl.appendChild(header);
+
+    // ── PR items (if not collapsed) ───────────────────
+    if (!isCollapsed) {
+      repoPrs.forEach((pr) => {
+        const key = `${pr.project}/${pr.repo}/${pr.id}`;
+        const review = reviewStatuses[key];
+        const reviewStatus = review ? review.status : null;
+        const reviewAgent = review ? review.agentId : null;
+        const dotClass = reviewStatus || pr.reviewStatus || 'pending';
+
+        const item = document.createElement('div');
+        const prAgeMs = pr.createdDate ? (Date.now() - new Date(pr.createdDate).getTime()) : 0;
+        const prAgeDays = Math.floor(prAgeMs / (24 * 60 * 60 * 1000));
+        const isOld = prAgeDays > maxPrAgeDays;
+        item.className = `pr-item grouped${isOld ? ' stale' : ''}`;
+
+        // Status dot
+        const dot = document.createElement('div');
+        dot.className = `status-dot ${dotClass}`;
+        dot.title = dotClass;
+
+        // Age label
+        const ageStr = prAgeDays === 0 ? 'today' : prAgeDays === 1 ? '1d ago' : `${prAgeDays}d ago`;
+
+        // Info — show just PR number + title since repo is in the header
+        const info = document.createElement('div');
+        info.className = 'pr-info';
+        info.innerHTML = `
+          <div class="pr-path">#${pr.id} ${esc(pr.title)}</div>
+          <div class="pr-title">by ${esc(pr.createdBy)} · ${ageStr}</div>
+        `;
+
+        // Badge + view button for active reviews
+        const actions = document.createElement('div');
+        actions.className = 'pr-actions';
+
+        if (reviewStatus) {
+          const badge = document.createElement('span');
+          badge.className = `pr-review-badge ${reviewStatus}`;
+          badge.textContent = reviewStatus === 'cloning' ? 'cloning\u2026' : reviewStatus;
+          actions.appendChild(badge);
+
+          if (reviewStatus === 'running' || reviewStatus === 'completed' || reviewStatus === 'failed' || reviewStatus === 'cloning') {
+            const viewBtn = document.createElement('button');
+            viewBtn.className = 'btn-view-review';
+            viewBtn.textContent = '\u25B8';  // ▸
+            viewBtn.title = 'View review output';
+            viewBtn.addEventListener('click', (e) => {
+              e.stopPropagation();
+              openReviewDetail(key, pr, reviewStatus, reviewAgent);
+            });
+            actions.appendChild(viewBtn);
+          }
+        }
+
+        item.appendChild(dot);
+        item.appendChild(info);
+        item.appendChild(actions);
+
+        // Click to start review (only if not already running)
+        item.addEventListener('click', () => {
+          if (reviewStatus === 'running' || reviewStatus === 'cloning') {
+            openReviewDetail(key, pr, reviewStatus, reviewAgent);
+          } else {
+            startReview(pr);
+          }
+        });
+
+        prListEl.appendChild(item);
+      });
+    }
   });
+}
+
+// ── Repo config popover (gear icon) ─────────────────────────────
+function toggleRepoConfigPopover(repoKey, anchorEl) {
+  // Close any open popover
+  closeConfigPopover();
+
+  const cfg = repoConfigs[repoKey] || {};
+  const hasCustom = cfg.mode === 'repo' && cfg.repoFile;
+
+  const popover = document.createElement('div');
+  popover.className = 'repo-config-popover';
+
+  const titleEl = document.createElement('div');
+  titleEl.className = 'popover-title';
+  titleEl.textContent = 'Custom Review Prompt';
+  popover.appendChild(titleEl);
+
+  const hintEl = document.createElement('div');
+  hintEl.className = 'popover-hint';
+  hintEl.textContent = 'Pick a prompt file from this repo to use instead of the default.';
+  popover.appendChild(hintEl);
+
+  // ── Autocomplete input for repo file ──
+  const autocomplete = createAutocompleteInput(
+    repoKey,
+    cfg.repoFile || '',
+    'Search for a file in the repo\u2026',
+  );
+  popover.appendChild(autocomplete);
+
+  // ── Button row: Save + Reset ──
+  const btnRow = document.createElement('div');
+  btnRow.className = 'popover-btn-row';
+
+  const resetBtn = document.createElement('button');
+  resetBtn.className = 'popover-reset-btn';
+  resetBtn.textContent = 'Use Default';
+  resetBtn.title = 'Remove custom prompt and use the built-in LGTM template';
+  if (!hasCustom) resetBtn.disabled = true;
+  resetBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    delete repoConfigs[repoKey];
+
+    const settings = await window.lgtm.getSettings();
+    settings.repoConfigs = { ...settings.repoConfigs };
+    delete settings.repoConfigs[repoKey];
+    await window.lgtm.saveSettings(settings);
+
+    closeConfigPopover();
+    renderPrList(currentPrs);
+  });
+
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'popover-save-btn';
+  saveBtn.textContent = 'Save';
+  saveBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const inp = popover.querySelector('.repo-config-input');
+    const repoFile = inp ? inp.value.trim() : '';
+
+    if (repoFile) {
+      repoConfigs[repoKey] = { mode: 'repo', repoFile };
+    } else {
+      delete repoConfigs[repoKey];
+    }
+
+    const settings = await window.lgtm.getSettings();
+    settings.repoConfigs = { ...repoConfigs };
+    await window.lgtm.saveSettings(settings);
+
+    closeConfigPopover();
+    renderPrList(currentPrs);
+  });
+
+  btnRow.appendChild(resetBtn);
+  btnRow.appendChild(saveBtn);
+  popover.appendChild(btnRow);
+
+  // Position the popover below the gear button
+  const rect = anchorEl.getBoundingClientRect();
+  popover.style.top = `${rect.bottom + 4}px`;
+  popover.style.right = `${window.innerWidth - rect.right}px`;
+
+  document.body.appendChild(popover);
+  openConfigPopover = popover;
+
+  // Auto-focus the input
+  const inp = popover.querySelector('.repo-config-input');
+  if (inp) setTimeout(() => inp.focus(), 50);
+
+  // Close on outside click (deferred to avoid immediate close)
+  setTimeout(() => {
+    document.addEventListener('click', onOutsidePopoverClick);
+  }, 10);
+}
+
+function onOutsidePopoverClick(e) {
+  if (openConfigPopover && !openConfigPopover.contains(e.target)) {
+    closeConfigPopover();
+  }
+}
+
+function closeConfigPopover() {
+  if (openConfigPopover) {
+    openConfigPopover.remove();
+    openConfigPopover = null;
+    document.removeEventListener('click', onOutsidePopoverClick);
+  }
+}
+
+// ── Star toggle ─────────────────────────────────────────────────
+async function toggleStar(repoKey) {
+  if (starredRepos.has(repoKey)) {
+    starredRepos.delete(repoKey);
+  } else {
+    starredRepos.add(repoKey);
+  }
+  await window.lgtm.saveStarredRepos(Array.from(starredRepos));
+  renderPrList(currentPrs);
+}
+
+// ── Auto-review (processes starred repos first) ─────────────────
+async function startAutoReview() {
+  if (autoReviewRunning) return;
+  autoReviewRunning = true;
+  updateAutoReviewBtn();
+
+  // Filter by age, then sort: starred repos first, then unstarred
+  const cutoffMs = maxPrAgeDays * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  const queue = [...currentPrs]
+    .filter((pr) => {
+      if (!pr.createdDate) return true;  // include if no date (shouldn't happen)
+      return (now - new Date(pr.createdDate).getTime()) <= cutoffMs;
+    })
+    .sort((a, b) => {
+      const aKey = `${a.project}/${a.repo}`;
+      const bKey = `${b.project}/${b.repo}`;
+      const aStarred = starredRepos.has(aKey) ? 0 : 1;
+      const bStarred = starredRepos.has(bKey) ? 0 : 1;
+      if (aStarred !== bStarred) return aStarred - bStarred;
+      return aKey.localeCompare(bKey);
+    });
+
+  for (const pr of queue) {
+    if (!autoReviewRunning) break;  // user cancelled
+
+    const key = `${pr.project}/${pr.repo}/${pr.id}`;
+    const existing = reviewStatuses[key];
+    // Skip PRs that are already running, cloning, or completed
+    if (existing && (existing.status === 'running' || existing.status === 'cloning' || existing.status === 'completed')) {
+      continue;
+    }
+
+    // Start the review and wait for it to finish before moving to next
+    await startReview(pr);
+
+    // Wait for this review to complete before starting the next one
+    await waitForReviewComplete(key);
+  }
+
+  autoReviewRunning = false;
+  updateAutoReviewBtn();
+}
+
+function stopAutoReview() {
+  autoReviewRunning = false;
+  updateAutoReviewBtn();
+}
+
+function waitForReviewComplete(key) {
+  return new Promise((resolve) => {
+    const check = () => {
+      const review = reviewStatuses[key];
+      if (!review || review.status === 'completed' || review.status === 'failed') {
+        resolve();
+      } else if (!autoReviewRunning) {
+        resolve();  // cancelled
+      } else {
+        setTimeout(check, 1000);
+      }
+    };
+    // Start checking after a brief delay to allow the status to be set
+    setTimeout(check, 500);
+  });
+}
+
+function updateAutoReviewBtn() {
+  const btn = document.getElementById('auto-review-btn');
+  if (!btn) return;
+  if (autoReviewRunning) {
+    btn.textContent = '\u25A0';  // ■ stop
+    btn.title = 'Stop auto-review';
+    btn.classList.add('running');
+  } else {
+    btn.textContent = '\u25B6';  // ▶ play
+    btn.title = 'Auto-review all PRs (starred repos first)';
+    btn.classList.remove('running');
+  }
 }
 
 async function startReview(pr) {
@@ -283,6 +588,15 @@ refreshBtn.addEventListener('click', async () => {
   refreshBtn.textContent = '↻';
 });
 
+// ── Auto-review button ──────────────────────────────────────────
+document.getElementById('auto-review-btn').addEventListener('click', () => {
+  if (autoReviewRunning) {
+    stopAutoReview();
+  } else {
+    startAutoReview();
+  }
+});
+
 // ── Settings ─────────────────────────────────────────────────────
 settingsBtn.addEventListener('click', async () => {
   await populateSettings();
@@ -294,8 +608,11 @@ async function populateSettings() {
   sPromptPath.value = s.promptPath || '';
   sWebhookPort.value = s.webhookPort || 3847;
   sPollInterval.value = Math.round((s.pollingIntervalMs || 60000) / 1000);
+  sMaxPrAge.value = s.maxPrAgeDays || 7;
   agentModels = s.agentModels || {};
   repoConfigs = s.repoConfigs || {};
+  starredRepos = new Set(s.starredRepos || []);
+  maxPrAgeDays = s.maxPrAgeDays || 7;
 
   agents = await window.lgtm.refreshAgents();
   renderAgentConfig(s.defaultAgent || 'claude');
@@ -523,67 +840,25 @@ function renderRepoConfig() {
   }
 
   repos.forEach((repoKey) => {
-    const existing = repoConfigs[repoKey] || { mode: 'auto' };
+    const cfg = repoConfigs[repoKey] || {};
 
     const row = document.createElement('div');
     row.className = 'repo-config-row';
 
-    // Repo name
     const nameEl = document.createElement('div');
     nameEl.className = 'repo-config-name';
     nameEl.textContent = repoKey;
 
-    // Mode select
-    const controlRow = document.createElement('div');
-    controlRow.className = 'repo-config-controls';
-
-    const modeSelect = document.createElement('select');
-    modeSelect.className = 'repo-mode-select';
-    modeSelect.dataset.repoKey = repoKey;
-
-    [
-      { value: 'auto', label: 'Auto-detect from repo' },
-      { value: 'repo', label: 'Specific file in repo' },
-      { value: 'custom', label: 'Custom local path' },
-    ].forEach((opt) => {
-      const o = document.createElement('option');
-      o.value = opt.value;
-      o.textContent = opt.label;
-      if (existing.mode === opt.value) o.selected = true;
-      modeSelect.appendChild(o);
-    });
-
-    controlRow.appendChild(modeSelect);
-
-    // Input container — swapped based on mode
-    const inputContainer = document.createElement('div');
-    inputContainer.className = 'repo-input-container';
-
-    function buildInput(mode, value) {
-      inputContainer.innerHTML = '';
-      if (mode === 'auto') {
-        inputContainer.classList.add('hidden');
-      } else if (mode === 'repo') {
-        inputContainer.classList.remove('hidden');
-        const autocomplete = createAutocompleteInput(repoKey, value, 'Start typing a file path…');
-        inputContainer.appendChild(autocomplete);
-      } else {
-        inputContainer.classList.remove('hidden');
-        const picker = createFilePickerInput(repoKey, value, '/absolute/path/to/prompt.md');
-        inputContainer.appendChild(picker);
-      }
+    const statusEl = document.createElement('div');
+    statusEl.className = 'hint';
+    if (cfg.mode === 'repo' && cfg.repoFile) {
+      statusEl.textContent = `Custom prompt: ${cfg.repoFile}`;
+    } else {
+      statusEl.textContent = 'Using default template';
     }
 
-    buildInput(existing.mode, existing.mode === 'repo' ? existing.repoFile : existing.customPath);
-
-    modeSelect.addEventListener('change', () => {
-      buildInput(modeSelect.value, '');
-    });
-
-    controlRow.appendChild(inputContainer);
-
     row.appendChild(nameEl);
-    row.appendChild(controlRow);
+    row.appendChild(statusEl);
     repoConfigList.appendChild(row);
   });
 }
@@ -598,36 +873,21 @@ settingsSave.addEventListener('click', async () => {
   const defaultRadio = agentConfigList.querySelector('input[name="default-agent"]:checked');
   const defaultAgent = defaultRadio ? defaultRadio.value : 'claude';
 
-  // Repo configs
-  const newRepoConfigs = {};
-  repoConfigList.querySelectorAll('.repo-config-row').forEach((row) => {
-    const modeSelect = row.querySelector('.repo-mode-select');
-    const inputEl = row.querySelector('.repo-config-input');
-    const repoKey = modeSelect.dataset.repoKey;
-    const mode = modeSelect.value;
-    const inputValue = inputEl ? inputEl.value.trim() : '';
-
-    if (mode === 'auto') {
-      newRepoConfigs[repoKey] = { mode: 'auto' };
-    } else if (mode === 'repo') {
-      newRepoConfigs[repoKey] = { mode: 'repo', repoFile: inputValue };
-    } else {
-      newRepoConfigs[repoKey] = { mode: 'custom', customPath: inputValue };
-    }
-  });
-
+  // Repo configs — managed via popover on PR list, just preserve current state
+  const newMaxPrAge = parseInt(sMaxPrAge.value) || 7;
   await window.lgtm.saveSettings({
     promptPath: sPromptPath.value.trim(),
     webhookPort: parseInt(sWebhookPort.value) || 3847,
     pollingIntervalMs: (parseInt(sPollInterval.value) || 60) * 1000,
     defaultAgent,
     agentModels: newAgentModels,
-    repoConfigs: newRepoConfigs,
+    repoConfigs,
+    maxPrAgeDays: newMaxPrAge,
   });
+  maxPrAgeDays = newMaxPrAge;
 
   selectedAgent = defaultAgent;
   agentModels = newAgentModels;
-  repoConfigs = newRepoConfigs;
   renderAgentSelect();
   showView(prListView);
 });

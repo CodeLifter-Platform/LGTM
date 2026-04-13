@@ -25,6 +25,7 @@
     "mac": {
       "category": "public.app-category.developer-tools",
       "icon": "resources/icon.icns",
+      "artifactName": "LGTM-${arch}.${ext}",
       "target": [
         "dmg",
         "zip"
@@ -35,10 +36,14 @@
     },
     "win": {
       "icon": "resources/icon.ico",
+      "artifactName": "LGTM-Setup.${ext}",
       "target": [
         "nsis",
         "portable"
       ]
+    },
+    "portable": {
+      "artifactName": "LGTM-Portable.exe"
     },
     "nsis": {
       "oneClick": false,
@@ -46,8 +51,12 @@
     },
     "extraResources": [
       {
-        "from": "resources/NYLE_PR_PROMPT.md",
-        "to": "NYLE_PR_PROMPT.md"
+        "from": "resources/LGTM_REVIEW_PROMPT.md",
+        "to": "LGTM_REVIEW_PROMPT.md"
+      },
+      {
+        "from": "resources/REPO_REVIEW_TEMPLATE.md",
+        "to": "REPO_REVIEW_TEMPLATE.md"
       }
     ]
   },

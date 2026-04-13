@@ -533,6 +533,223 @@ hr {
   line-height: 1.5;
 }
 
+/* ── Auto-review button ──────────────────────────────────────── */
+.btn-auto-review {
+  -webkit-app-region: no-drag;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--green);
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  line-height: 1;
+}
+.btn-auto-review:hover {
+  border-color: var(--green);
+  background: rgba(46, 204, 113, 0.1);
+}
+.btn-auto-review.running {
+  color: var(--red);
+  border-color: var(--red);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.btn-auto-review.running:hover {
+  background: rgba(231, 76, 60, 0.1);
+}
+
+/* ── Repo group headers (PR list) ─────────────────────────────── */
+.repo-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.15s, background 0.15s;
+}
+.repo-group-header:hover {
+  border-color: rgba(76, 201, 240, 0.3);
+  background: rgba(76, 201, 240, 0.03);
+}
+.repo-group-header.starred {
+  border-color: rgba(243, 156, 18, 0.35);
+  background: rgba(243, 156, 18, 0.04);
+}
+.repo-group-header.starred:hover {
+  border-color: rgba(243, 156, 18, 0.5);
+  background: rgba(243, 156, 18, 0.07);
+}
+
+.repo-chevron {
+  font-size: 11px;
+  color: var(--text-dim);
+  transition: transform 0.15s;
+  flex-shrink: 0;
+  width: 12px;
+  text-align: center;
+}
+.repo-chevron.collapsed {
+  transform: rotate(-90deg);
+}
+
+.repo-group-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.repo-group-count {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-dim);
+  background: rgba(136, 146, 164, 0.15);
+  border-radius: 10px;
+  padding: 1px 7px;
+  flex-shrink: 0;
+}
+
+.repo-prompt-indicator {
+  font-size: 10px;
+  color: var(--text-dim);
+  font-style: italic;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.repo-star-btn {
+  -webkit-app-region: no-drag;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 2px;
+  flex-shrink: 0;
+  transition: color 0.15s, transform 0.15s;
+  line-height: 1;
+}
+.repo-star-btn:hover {
+  color: var(--yellow);
+  transform: scale(1.15);
+}
+.repo-star-btn.active {
+  color: var(--yellow);
+}
+
+.repo-gear-btn {
+  -webkit-app-region: no-drag;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 15px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  transition: color 0.15s, background 0.15s;
+  line-height: 1;
+}
+.repo-gear-btn:hover {
+  color: var(--accent);
+  background: rgba(76, 201, 240, 0.1);
+}
+
+/* Grouped PR items get a left indent */
+.pr-item.grouped {
+  margin-left: 16px;
+  border-left: 2px solid var(--border);
+}
+.pr-item.grouped:hover {
+  border-left-color: var(--accent);
+}
+/* Stale PRs (older than max age) are dimmed — won't be auto-reviewed */
+.pr-item.stale {
+  opacity: 0.5;
+}
+.pr-item.stale:hover {
+  opacity: 0.75;
+}
+
+/* ── Repo config popover ─────────────────────────────────────── */
+.repo-config-popover {
+  position: fixed;
+  z-index: 200;
+  width: 280px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.popover-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.popover-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.popover-btn-row {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+.popover-reset-btn {
+  -webkit-app-region: no-drag;
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.popover-reset-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.popover-reset-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.popover-save-btn {
+  -webkit-app-region: no-drag;
+  background: var(--accent);
+  color: #111;
+  border: none;
+  border-radius: var(--radius);
+  padding: 5px 14px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.popover-save-btn:hover { opacity: 0.85; }
+
 /* ── Repo prompt config (settings) ────────────────────────────── */
 .repo-config-list {
   display: flex;
