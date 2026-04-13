@@ -12,18 +12,17 @@ permissions:
 
 # ── Version strategy ──────────────────────────────────────────────
 #
-#   MAJOR  → GitHub Actions variable "MAJOR_VERSION" (default: 1)
-#            Bump manually in repo Settings → Variables → Actions
-#   MINOR  → GITHUB_RUN_NUMBER (auto-increments every workflow run)
-#   PATCH  → always 0
+#   BASE_VERSION → GitHub Actions variable (e.g. "1.6")
+#                  Set in repo Settings → Variables → Actions
+#   PATCH        → GITHUB_RUN_NUMBER (auto-increments every run)
 #
-#   main branch:    1.42.0          (clean release)
-#   other branches: 1.42.0-pre.87+abc1234  (prerelease)
+#   main branch:    1.6.1, 1.6.2, 1.6.3 …  (clean releases)
+#   other branches: 1.6.1-pre.42+abc1234    (prerelease)
 #
-# To start a new major version:
+# To bump minor/major:
 #   1. Go to Settings → Secrets and variables → Actions → Variables
-#   2. Set MAJOR_VERSION to the new number (e.g., 2)
-#   3. Next push to main becomes 2.43.0
+#   2. Change BASE_VERSION (e.g. "1.7" or "2.0")
+#   3. Next push to main becomes 1.7.<next_run> etc.
 # ──────────────────────────────────────────────────────────────────
 
 jobs:
@@ -38,17 +37,16 @@ jobs:
       - name: Generate semantic version
         id: semver
         run: |
-          MAJOR="${{ vars.MAJOR_VERSION || '1' }}"
-          MINOR="${{ github.run_number }}"
-          PATCH="0"
+          BASE="${{ vars.BASE_VERSION || '1.0' }}"
+          PATCH="${{ github.run_number }}"
           SHORT_SHA="${GITHUB_SHA:0:7}"
           IS_MAIN="${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}"
 
           if [ "$IS_MAIN" = "true" ]; then
-            VERSION="${MAJOR}.${MINOR}.${PATCH}"
+            VERSION="${BASE}.${PATCH}"
             IS_RELEASE="true"
           else
-            VERSION="${MAJOR}.${MINOR}.${PATCH}-pre.${GITHUB_RUN_NUMBER}+${SHORT_SHA}"
+            VERSION="${BASE}.${PATCH}-pre.${GITHUB_RUN_NUMBER}+${SHORT_SHA}"
             IS_RELEASE="false"
           fi
 
@@ -155,7 +153,7 @@ jobs:
           RELEASE_DATE=$(date -u +"%Y-%m-%d")
           REPO_URL="https://github.com/CodeLifterIO/LGTM"
           NEW_ROW="| ${VERSION_TAG} | ${RELEASE_DATE} | [dmg](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-arm64.dmg) · [zip](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-arm64.zip) | [installer](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-Setup.exe) · [portable](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-Portable.exe) | [Release notes](${REPO_URL}/releases/tag/${VERSION_TAG}) |"
-          awk -v row="$NEW_ROW" '/<!-- RELEASE_TABLE_MARKER -->/{print row} {print}' README.md > README.tmp && mv README.tmp README.md
+          awk -v row="$NEW_ROW" '/\|[-]+\|[-]+\|[-]+\|[-]+\|[-]+\|/{print; print row; next} {print}' README.md > README.tmp && mv README.tmp README.md
 
       - name: Commit version bump
         run: |
