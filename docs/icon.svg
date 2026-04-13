@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7B2FBE"/>
+      <stop offset="50%" stop-color="#5B4FD6"/>
+      <stop offset="100%" stop-color="#3A8BF5"/>
+    </linearGradient>
+    <linearGradient id="bubble" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#E8EEFF" stop-opacity="0.95"/>
+    </linearGradient>
+    <linearGradient id="check" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7B2FBE"/>
+      <stop offset="100%" stop-color="#3A8BF5"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="20" flood-color="#000000" flood-opacity="0.25"/>
+    </filter>
+    <filter id="innerGlow" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#7B2FBE" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <!-- Rounded square background -->
+  <rect x="0" y="0" width="1024" height="1024" rx="220" ry="220" fill="url(#bg)"/>
+
+  <!-- Subtle shine overlay -->
+  <rect x="0" y="0" width="1024" height="512" rx="220" ry="220" fill="white" opacity="0.06"/>
+
+  <!-- Chat bubble -->
+  <g filter="url(#shadow)">
+    <!-- Main bubble body -->
+    <path d="
+      M 240 260
+      h 544
+      q 60 0 60 60
+      v 300
+      q 0 60 -60 60
+      h -340
+      l -100 100
+      v -100
+      h -104
+      q -60 0 -60 -60
+      v -300
+      q 0 -60 60 -60
+      Z
+    " fill="url(#bubble)"/>
+  </g>
+
+  <!-- Checkmark inside bubble -->
+  <g filter="url(#innerGlow)">
+    <polyline
+      points="370,460 470,560 654,376"
+      fill="none"
+      stroke="url(#check)"
+      stroke-width="64"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+  </g>
+
+  <!-- Small "LGTM" text below bubble -->
+  <text x="512" y="870" text-anchor="middle" font-family="-apple-system, 'SF Pro Display', 'Helvetica Neue', sans-serif" font-size="100" font-weight="800" letter-spacing="12" fill="white" opacity="0.9">LGTM</text>
+</svg>
