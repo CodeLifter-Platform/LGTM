@@ -18,6 +18,7 @@ A cross-platform menu bar app that lists your open Azure DevOps pull requests an
 
 | Version | Date | macOS | Windows | Notes |
 |---------|------|-------|---------|-------|
+| v0.5.8 | 2026-04-13 | [dmg](https://github.com/CodeLifterIO/LGTM/releases/download/v0.5.8/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifterIO/LGTM/releases/download/v0.5.8/LGTM-arm64.zip) | [installer](https://github.com/CodeLifterIO/LGTM/releases/download/v0.5.8/LGTM-Setup.exe) · [portable](https://github.com/CodeLifterIO/LGTM/releases/download/v0.5.8/LGTM-Portable.exe) | [Release notes](https://github.com/CodeLifterIO/LGTM/releases/tag/v0.5.8) |
 | v0.5.7 | 2026-04-13 | [dmg](https://github.com/CodeLifterIO/LGTM/releases/download/v0.5.7/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifterIO/LGTM/releases/download/v0.5.7/LGTM-arm64.zip) | [installer](https://github.com/CodeLifterIO/LGTM/releases/download/v0.5.7/LGTM-Setup.exe) · [portable](https://github.com/CodeLifterIO/LGTM/releases/download/v0.5.7/LGTM-Portable.exe) | [Release notes](https://github.com/CodeLifterIO/LGTM/releases/tag/v0.5.7) |
 <!-- RELEASE_TABLE_MARKER -->
 
