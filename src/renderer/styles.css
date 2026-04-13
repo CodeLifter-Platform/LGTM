@@ -51,8 +51,21 @@ html, body {
 }
 
 /* ── Views ─────────────────────────────────────────────────────── */
-.view { padding: 14px; }
+.view {
+  padding: 14px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;         /* allow flex child to shrink below content size */
+  overflow: hidden;
+}
 .hidden { display: none !important; }
+
+/* Make body a flex column so views fill available space */
+body {
+  display: flex;
+  flex-direction: column;
+}
 
 /* ── Card ──────────────────────────────────────────────────────── */
 .card {
@@ -199,11 +212,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* ── PR list ───────────────────────────────────────────────────── */
 .pr-list {
-  max-height: 460px;
+  flex: 1;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-height: 0;
 }
 .pr-list::-webkit-scrollbar { width: 5px; }
 .pr-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
