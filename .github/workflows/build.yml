@@ -150,11 +150,18 @@ jobs:
       - name: Stamp version into package.json
         run: npm version "$APP_VERSION" --no-git-tag-version --allow-same-version
 
+      - name: Update release history in README
+        run: |
+          RELEASE_DATE=$(date -u +"%Y-%m-%d")
+          REPO_URL="https://github.com/CodeLifterIO/LGTM"
+          NEW_ROW="| ${VERSION_TAG} | ${RELEASE_DATE} | [dmg](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-arm64.dmg) · [zip](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-arm64.zip) | [installer](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-Setup.exe) · [portable](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-Portable.exe) | [Release notes](${REPO_URL}/releases/tag/${VERSION_TAG}) |"
+          sed -i "s|<!-- RELEASE_TABLE_MARKER -->|${NEW_ROW}\n<!-- RELEASE_TABLE_MARKER -->|" README.md
+
       - name: Commit version bump
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json
+          git add package.json package-lock.json README.md
           git diff --cached --quiet || git commit -m "chore: bump version to ${APP_VERSION} [skip ci]"
           git tag "$VERSION_TAG"
           git push origin main --tags

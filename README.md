@@ -5,14 +5,20 @@ A cross-platform menu bar app that lists your open Azure DevOps pull requests an
 [![Build & Release](https://github.com/CodeLifterIO/LGTM/actions/workflows/build.yml/badge.svg)](https://github.com/CodeLifterIO/LGTM/actions/workflows/build.yml)
 [![Latest Release](https://img.shields.io/github/v/release/CodeLifterIO/LGTM?include_prereleases&label=latest)](https://github.com/CodeLifterIO/LGTM/releases/latest)
 
-## Download
+## Download Latest
 
 | Platform | Installer | Portable |
 |----------|-----------|----------|
-| **macOS** | [LGTM-arm64.dmg](https://github.com/CodeLifterIO/LGTM/releases/latest/download/LGTM-arm64.dmg) | [LGTM-arm64.zip](https://github.com/CodeLifterIO/LGTM/releases/latest/download/LGTM-arm64.zip) |
+| **macOS (Apple Silicon)** | [LGTM-arm64.dmg](https://github.com/CodeLifterIO/LGTM/releases/latest/download/LGTM-arm64.dmg) | [LGTM-arm64.zip](https://github.com/CodeLifterIO/LGTM/releases/latest/download/LGTM-arm64.zip) |
 | **Windows** | [LGTM-Setup.exe](https://github.com/CodeLifterIO/LGTM/releases/latest/download/LGTM-Setup.exe) | [LGTM-Portable.exe](https://github.com/CodeLifterIO/LGTM/releases/latest/download/LGTM-Portable.exe) |
 
 > **Note:** The app is not code-signed yet. On macOS, right-click → Open to bypass Gatekeeper. On Windows, click "More info" → "Run anyway" in SmartScreen.
+
+## Release History
+
+| Version | Date | macOS | Windows | Notes |
+|---------|------|-------|---------|-------|
+<!-- RELEASE_TABLE_MARKER -->
 
 ## Features
 
