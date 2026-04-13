@@ -10,6 +10,34 @@
  */
 
 const { execSync } = require('child_process');
+const path = require('path');
+
+/**
+ * Electron apps on macOS don't inherit the user's shell PATH when launched
+ * from Finder/Dock. This means CLIs installed via Homebrew, npm -g, etc.
+ * won't be found by `which`. We fix this by appending common install
+ * locations to the PATH used for detection and spawning.
+ */
+const EXTRA_PATHS = [
+  '/usr/local/bin',
+  '/opt/homebrew/bin',
+  '/opt/homebrew/sbin',
+  `${process.env.HOME}/.npm-global/bin`,
+  `${process.env.HOME}/.local/bin`,
+  `${process.env.HOME}/.nvm/current/bin`,
+  `${process.env.HOME}/.volta/bin`,
+  `${process.env.HOME}/.cargo/bin`,
+  '/usr/local/share/npm/bin',
+];
+
+function getEnhancedPath() {
+  const currentPath = process.env.PATH || '';
+  const extra = EXTRA_PATHS.filter((p) => !currentPath.includes(p));
+  return extra.length > 0 ? `${currentPath}:${extra.join(':')}` : currentPath;
+}
+
+// Apply the enhanced PATH to the process so child_process.spawn also sees it
+process.env.PATH = getEnhancedPath();
 
 const AGENTS = [
   {
@@ -133,10 +161,15 @@ class AgentRegistry {
   static _isInstalled(command) {
     try {
       const which = process.platform === 'win32' ? 'where' : 'which';
-      const result = execSync(`${which} ${command}`, { timeout: 5000, encoding: 'utf8' }).trim();
+      const result = execSync(`${which} ${command}`, {
+        timeout: 5000,
+        encoding: 'utf8',
+        env: { ...process.env },   // uses the enhanced PATH
+      }).trim();
       console.log(`[LGTM]   which ${command} → ${result}`);
       return true;
     } catch {
+      console.log(`[LGTM]   which ${command} → not found`);
       return false;
     }
   }

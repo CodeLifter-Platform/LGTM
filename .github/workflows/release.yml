@@ -1,0 +1,116 @@
+name: Auto Release
+
+# Runs on every push to main. Scans commit messages since the last tag,
+# determines the semver bump from conventional commit prefixes, bumps
+# package.json, creates the tag, and triggers the build workflow.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  version-and-tag:
+    # Skip if the commit was made by this workflow (prevents loops)
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+    outputs:
+      new_tag: ${{ steps.bump.outputs.new_tag }}
+      bumped: ${{ steps.bump.outputs.bumped }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # full history for tag detection
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Determine version bump from commits
+        id: bump
+        run: |
+          # Find the latest version tag
+          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          if [ -z "$LATEST_TAG" ]; then
+            echo "No existing tags found. Starting at v1.0.0"
+            LATEST_TAG="v0.0.0"
+            RANGE="HEAD"
+          else
+            echo "Latest tag: $LATEST_TAG"
+            RANGE="${LATEST_TAG}..HEAD"
+          fi
+
+          # Parse current version numbers
+          VERSION="${LATEST_TAG#v}"
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+
+          # Scan commit messages for conventional commit prefixes
+          COMMITS=$(git log "$RANGE" --pretty=format:"%s" 2>/dev/null || echo "")
+          if [ -z "$COMMITS" ]; then
+            echo "No new commits since $LATEST_TAG"
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Commits since $LATEST_TAG:"
+          echo "$COMMITS"
+          echo "---"
+
+          # Determine bump level
+          BUMP="none"
+          while IFS= read -r msg; do
+            if echo "$msg" | grep -qiE "^(feat|feature)(\(.+\))?!:|BREAKING CHANGE"; then
+              BUMP="major"
+              break
+            elif echo "$msg" | grep -qiE "^(feat|feature)(\(.+\))?:"; then
+              if [ "$BUMP" != "major" ]; then BUMP="minor"; fi
+            elif echo "$msg" | grep -qiE "^(fix|perf|refactor)(\(.+\))?:"; then
+              if [ "$BUMP" = "none" ]; then BUMP="patch"; fi
+            fi
+          done <<< "$COMMITS"
+
+          if [ "$BUMP" = "none" ]; then
+            echo "No conventional commits found — skipping release"
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Calculate new version
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          NEW_TAG="v${NEW_VERSION}"
+          echo "Bump: $BUMP → $NEW_TAG"
+
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
+          echo "bumped=true" >> "$GITHUB_OUTPUT"
+
+      - name: Bump package.json and create tag
+        if: steps.bump.outputs.bumped == 'true'
+        run: |
+          NEW_VERSION="${{ steps.bump.outputs.new_version }}"
+          NEW_TAG="${{ steps.bump.outputs.new_tag }}"
+
+          # Update package.json version (without creating a git tag)
+          npm version "$NEW_VERSION" --no-git-tag-version
+
+          # Commit and tag
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git commit -m "chore: bump version to ${NEW_VERSION} [skip ci]"
+          git tag "$NEW_TAG"
+          git push origin main --tags

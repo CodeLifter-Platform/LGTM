@@ -1,66 +1,69 @@
 # How to Release LGTM
 
-## Quick Release
+## Automatic Releases (Default)
+
+Just push to `main` using conventional commit messages. The pipeline handles everything:
+
+```bash
+git commit -m "feat: add dark mode toggle"
+git push origin main
+```
+
+The pipeline will:
+
+1. **Scan** commit messages since the last tag
+2. **Determine** the semver bump (patch, minor, or major)
+3. **Bump** `package.json` and create a git tag
+4. **Build** macOS and Windows installers in parallel
+5. **Create** a draft GitHub Release with all artifacts
+6. **Update** README download links
+
+Then go to [Releases](https://github.com/CodeLifterIO/LGTM/releases), review the draft, and publish.
+
+## Conventional Commit Prefixes
+
+The commit message prefix determines the version bump:
+
+| Prefix | Bump | Example |
+|--------|------|---------|
+| `fix:` | **patch** (1.0.0 → 1.0.1) | `fix: resolve PAT storage on restart` |
+| `perf:` | **patch** | `perf: cache repo file tree responses` |
+| `refactor:` | **patch** | `refactor: extract prompt resolver` |
+| `feat:` | **minor** (1.0.0 → 1.1.0) | `feat: add per-repo prompt config` |
+| `feat!:` | **major** (1.0.0 → 2.0.0) | `feat!: redesign settings panel` |
+| anything else | **no release** | `docs: update readme`, `chore: clean up` |
+
+You can also add a scope: `fix(auth): handle expired PAT gracefully`
+
+If no conventional commits are found since the last tag, no release is created.
+
+## Manual Release (Override)
+
+To force a specific version (e.g., for a major release):
 
 ```bash
 git checkout main
-git tag v1.0.0
-git push origin v1.0.0
+git tag v2.0.0
+git push origin v2.0.0
 ```
 
-Replace `v1.0.0` with your desired version. That's it — GitHub Actions handles the rest.
+This skips the auto-bump and triggers the build directly.
 
-## What Happens Automatically
+## Manual Build Without Release
 
-1. **Build** — macOS and Windows builds run in parallel (~5 min)
-2. **Package** — produces `.dmg`, `.zip`, Setup `.exe`, and Portable `.exe`
-3. **Release** — a draft GitHub Release is created with all installers attached
-4. **README** — download links in `README.md` are updated and committed to `main`
-
-## After the Build Finishes
-
-1. Go to [Releases](https://github.com/CodeLifterIO/LGTM/releases)
-2. Find the draft release for your tag
-3. Review the auto-generated release notes
-4. Click **Publish release** when ready
-
-## Version Numbering
-
-Follow [semver](https://semver.org/): `vMAJOR.MINOR.PATCH`
-
-- **Patch** (`v1.0.1`) — bug fixes, dependency updates
-- **Minor** (`v1.1.0`) — new features, backwards compatible
-- **Major** (`v2.0.0`) — breaking changes
-
-For pre-release builds: `v1.1.0-beta.1`, `v2.0.0-rc.1`
-
-## Updating package.json Version
-
-Before tagging, update the version in `package.json` to match:
-
-```bash
-npm version 1.1.0 --no-git-tag-version
-git add package.json package-lock.json
-git commit -m "Bump version to 1.1.0"
-git tag v1.1.0
-git push origin main --tags
-```
-
-Or do it in one step with `npm version`:
-
-```bash
-npm version minor            # bumps 1.0.0 → 1.1.0, creates commit + tag
-git push origin main --tags  # pushes both the commit and the tag
-```
-
-## Manual Build Trigger
-
-To build without creating a release (e.g., for testing):
+To test builds without creating a release:
 
 1. Go to [Actions → Build & Release](https://github.com/CodeLifterIO/LGTM/actions/workflows/build.yml)
 2. Click **Run workflow**
 3. Select the branch
-4. Artifacts will be downloadable from the workflow run (no release created)
+4. Download artifacts from the workflow run
+
+## What Gets Built
+
+| Platform | Installer | Portable |
+|----------|-----------|----------|
+| macOS | `.dmg` | `.zip` |
+| Windows | Setup `.exe` (NSIS) | Portable `.exe` |
 
 ## Code Signing (Optional)
 
@@ -70,4 +73,4 @@ To sign builds so users don't see Gatekeeper/SmartScreen warnings:
 2. Add these secrets:
    - `CSC_LINK` — base64-encoded `.p12` certificate
    - `CSC_KEY_PASSWORD` — certificate password
-3. Remove `CSC_IDENTITY_AUTO_DISCOVERY: false` from the workflow
+3. Remove `CSC_IDENTITY_AUTO_DISCOVERY: false` from `build.yml`
