@@ -92,6 +92,13 @@ jobs:
             dist/*.zip
           if-no-files-found: error
 
+      - name: Upload macOS update metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: lgtm-mac-update
+          path: dist/latest-mac.yml
+          if-no-files-found: warn
+
   # ── Windows build ──────────────────────────────────────────────
   build-windows:
     needs: version
@@ -122,9 +129,15 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: lgtm-windows
-          path: |
-            dist/*.exe
+          path: dist/*.exe
           if-no-files-found: error
+
+      - name: Upload Windows update metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: lgtm-win-update
+          path: dist/latest.yml
+          if-no-files-found: warn
 
   # ── Release (main branch only) ─────────────────────────────────
   release:
@@ -170,11 +183,25 @@ jobs:
           name: lgtm-mac
           path: dist
 
+      - name: Download macOS update metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: lgtm-mac-update
+          path: dist
+        continue-on-error: true
+
       - name: Download Windows artifacts
         uses: actions/download-artifact@v4
         with:
           name: lgtm-windows
           path: dist
+
+      - name: Download Windows update metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: lgtm-win-update
+          path: dist
+        continue-on-error: true
 
       - name: List release files
         run: ls -lhR dist/
@@ -190,3 +217,5 @@ jobs:
             dist/**/*.dmg
             dist/**/*.zip
             dist/**/*.exe
+            dist/latest-mac.yml
+            dist/latest.yml

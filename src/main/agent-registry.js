@@ -18,22 +18,39 @@ const path = require('path');
  * won't be found by `which`. We fix this by appending common install
  * locations to the PATH used for detection and spawning.
  */
-const EXTRA_PATHS = [
+const HOME = process.env.HOME || process.env.USERPROFILE || '';
+const SEP = process.platform === 'win32' ? ';' : ':';
+
+const EXTRA_PATHS_UNIX = [
   '/usr/local/bin',
   '/opt/homebrew/bin',
   '/opt/homebrew/sbin',
-  `${process.env.HOME}/.npm-global/bin`,
-  `${process.env.HOME}/.local/bin`,
-  `${process.env.HOME}/.nvm/current/bin`,
-  `${process.env.HOME}/.volta/bin`,
-  `${process.env.HOME}/.cargo/bin`,
+  `${HOME}/.npm-global/bin`,
+  `${HOME}/.local/bin`,
+  `${HOME}/.nvm/current/bin`,
+  `${HOME}/.volta/bin`,
+  `${HOME}/.cargo/bin`,
   '/usr/local/share/npm/bin',
 ];
 
+const EXTRA_PATHS_WIN = [
+  `${process.env.APPDATA || ''}\\npm`,
+  `${process.env.LOCALAPPDATA || ''}\\Programs\\augment-code`,
+  `${process.env.LOCALAPPDATA || ''}\\augment-code`,
+  `${HOME}\\.npm-global`,
+  `${HOME}\\.volta\\bin`,
+  `${HOME}\\.cargo\\bin`,
+  `${process.env.PROGRAMFILES || ''}\\nodejs`,
+  `${process.env.PROGRAMFILES || ''}\\Augment`,
+  'C:\\Program Files\\nodejs',
+];
+
+const EXTRA_PATHS = process.platform === 'win32' ? EXTRA_PATHS_WIN : EXTRA_PATHS_UNIX;
+
 function getEnhancedPath() {
   const currentPath = process.env.PATH || '';
-  const extra = EXTRA_PATHS.filter((p) => !currentPath.includes(p));
-  return extra.length > 0 ? `${currentPath}:${extra.join(':')}` : currentPath;
+  const extra = EXTRA_PATHS.filter((p) => p && !currentPath.includes(p));
+  return extra.length > 0 ? `${currentPath}${SEP}${extra.join(SEP)}` : currentPath;
 }
 
 // Apply the enhanced PATH to the process so child_process.spawn also sees it

@@ -949,6 +949,51 @@ window.lgtm.onShowSettings(async () => {
   showView(settingsView);
 });
 
+// ── Auto-updater UI ─────────────────────────────────────────────
+const updateBanner = document.getElementById('update-banner');
+const updateMessage = document.getElementById('update-message');
+const updateActionBtn = document.getElementById('update-action-btn');
+const updateDismissBtn = document.getElementById('update-dismiss-btn');
+
+let updateState = 'idle'; // idle | available | downloading | ready
+
+window.lgtm.onUpdateAvailable((info) => {
+  updateState = 'available';
+  updateMessage.textContent = `Version ${info.version} is available!`;
+  updateActionBtn.textContent = 'Download';
+  updateBanner.classList.remove('hidden');
+});
+
+window.lgtm.onUpdateNotAvailable(() => {
+  updateState = 'idle';
+});
+
+window.lgtm.onUpdateDownloadProgress((progress) => {
+  updateMessage.innerHTML = `Downloading update… <span class="progress-text">${progress.percent}%</span>`;
+});
+
+window.lgtm.onUpdateDownloaded(() => {
+  updateState = 'ready';
+  updateMessage.textContent = 'Update ready!';
+  updateActionBtn.textContent = 'Restart';
+});
+
+updateActionBtn.addEventListener('click', () => {
+  if (updateState === 'available') {
+    updateState = 'downloading';
+    updateMessage.textContent = 'Downloading update…';
+    updateActionBtn.textContent = 'Downloading…';
+    updateActionBtn.disabled = true;
+    window.lgtm.downloadUpdate();
+  } else if (updateState === 'ready') {
+    window.lgtm.installUpdate();
+  }
+});
+
+updateDismissBtn.addEventListener('click', () => {
+  updateBanner.classList.add('hidden');
+});
+
 // ── Helpers ──────────────────────────────────────────────────────
 function esc(str) {
   const el = document.createElement('span');

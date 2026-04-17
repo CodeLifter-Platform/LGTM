@@ -26,6 +26,16 @@ contextBridge.exposeInMainWorld('lgtm', {
   getStarredRepos: () => ipcRenderer.invoke('get-settings').then((s) => s.starredRepos || []),
   saveStarredRepos: (repos) => ipcRenderer.invoke('save-settings', { starredRepos: repos }),
 
+  // Auto-updater
+  checkForUpdate: () => ipcRenderer.invoke('check-for-update'),
+  downloadUpdate: () => ipcRenderer.invoke('download-update'),
+  installUpdate: () => ipcRenderer.invoke('install-update'),
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  onUpdateAvailable: (cb) => ipcRenderer.on('update-available', (_e, info) => cb(info)),
+  onUpdateNotAvailable: (cb) => ipcRenderer.on('update-not-available', () => cb()),
+  onUpdateDownloadProgress: (cb) => ipcRenderer.on('update-download-progress', (_e, p) => cb(p)),
+  onUpdateDownloaded: (cb) => ipcRenderer.on('update-downloaded', () => cb()),
+
   // Events from main → renderer
   onPrList: (cb) => ipcRenderer.on('pr-list', (_e, prs) => cb(prs)),
   onPrError: (cb) => ipcRenderer.on('pr-error', (_e, msg) => cb(msg)),

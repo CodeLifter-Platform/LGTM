@@ -1,5 +1,6 @@
 const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, shell, dialog } = require('electron');
 const path = require('path');
+const { autoUpdater } = require('electron-updater');
 const { PatStore } = require('./pat-store');
 const { DevOpsClient } = require('./devops-client');
 const { AgentRunner } = require('./agent-runner');
@@ -32,6 +33,49 @@ const config = new ElectronStore({
   },
 });
 
+// ── Auto-updater ────────────────────────────────────────────────────
+autoUpdater.autoDownload = false;       // Don't download until user says so
+autoUpdater.autoInstallOnAppQuit = true;
+autoUpdater.logger = console;
+
+function initAutoUpdater() {
+  autoUpdater.on('update-available', (info) => {
+    console.log('[LGTM] Update available:', info.version);
+    if (mainWindow) {
+      mainWindow.webContents.send('update-available', {
+        version: info.version,
+        releaseNotes: info.releaseNotes || '',
+      });
+    }
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    console.log('[LGTM] App is up to date');
+    if (mainWindow) mainWindow.webContents.send('update-not-available');
+  });
+
+  autoUpdater.on('download-progress', (progress) => {
+    if (mainWindow) {
+      mainWindow.webContents.send('update-download-progress', {
+        percent: Math.round(progress.percent),
+      });
+    }
+  });
+
+  autoUpdater.on('update-downloaded', () => {
+    console.log('[LGTM] Update downloaded, ready to install');
+    if (mainWindow) mainWindow.webContents.send('update-downloaded');
+  });
+
+  autoUpdater.on('error', (err) => {
+    console.error('[LGTM] Auto-updater error:', err.message);
+  });
+
+  // Check on launch, then every 4 hours
+  autoUpdater.checkForUpdates().catch(() => {});
+  setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 4 * 60 * 60 * 1000);
+}
+
 // ── Single-instance lock ─────────────────────────────────────────────
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) { app.quit(); }
@@ -46,6 +90,7 @@ app.whenReady().then(async () => {
 
   createTray();
   createWindow();
+  initAutoUpdater();
 
   const existingPat = await patStore.get();
   const orgUrl = config.get('orgUrl');
@@ -73,9 +118,15 @@ function createTray() {
     ? 'tray-iconTemplate.png'
     : 'tray-icon-win.png';
   const iconPath = path.join(__dirname, '..', 'assets', iconFile);
-  let icon;
-  try { icon = nativeImage.createFromPath(iconPath); }
-  catch { icon = nativeImage.createEmpty(); }
+  let icon = nativeImage.createFromPath(iconPath);
+  if (icon.isEmpty()) {
+    console.warn('[LGTM] Tray icon not found at', iconPath, '— using fallback');
+    // 16x16 black dot as a visible fallback so the tray item always appears
+    icon = nativeImage.createFromDataURL(
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAKklEQVR42mNk+M9Qz0BBoAIGBob/DAwM9QQUMIwaMGrAqAGjBgyrMAAAFTsEEfnVaYoAAAAASUVORK5CYII='
+    );
+    if (process.platform === 'darwin') icon.setTemplateImage(true);
+  }
   if (process.platform === 'win32') icon = icon.resize({ width: 16, height: 16 });
   tray = new Tray(icon);
   tray.setToolTip('LGTM — PR Reviewer');
@@ -294,6 +345,13 @@ ipcMain.handle('get-repo-file-tree', async (_event, { project, repoName }) => {
     return { success: false, error: err.message, files: [] };
   }
 });
+
+// ── IPC: Auto-updater ──────────────────────────────────────────────
+
+ipcMain.handle('check-for-update', () => autoUpdater.checkForUpdates().catch(() => null));
+ipcMain.handle('download-update', () => autoUpdater.downloadUpdate().catch(() => null));
+ipcMain.handle('install-update', () => autoUpdater.quitAndInstall(false, true));
+ipcMain.handle('get-app-version', () => app.getVersion());
 
 // ── IPC: Native file picker ─────────────────────────────────────────
 
