@@ -21,11 +21,23 @@ const refreshBtn    = $('#refresh-btn');
 const settingsBtn   = $('#settings-btn');
 const agentSelect   = $('#agent-select');
 
+// Tabs
+const tabPrsBtn     = $('#tab-prs');
+const tabBugsBtn    = $('#tab-bugs');
+const tabPanePrs    = $('#tab-pane-prs');
+const tabPaneBugs   = $('#tab-pane-bugs');
+const bugsTabCount  = $('#bugs-tab-count');
+
+// Bugs
+const bugListEl     = $('#bug-list');
+const noBugsEl      = $('#no-bugs');
+
 // Review detail
 const reviewBackBtn     = $('#review-back-btn');
 const reviewDetailTitle = $('#review-detail-title');
 const reviewDetailMeta  = $('#review-detail-meta');
 const reviewDetailDot   = $('#review-detail-dot');
+const reviewDetailCancelBtn = $('#review-detail-cancel-btn');
 const reviewOutputEl    = $('#review-output');
 
 // Settings
@@ -53,6 +65,9 @@ let maxPrAgeDays = 7;        // only auto-review PRs within this age
 let activeDetailKey = null;  // which review is shown in the detail panel
 let knownRepos = new Set();  // "project/repo" strings from PR list
 let autoReviewRunning = false;
+let currentBugs = [];
+let activeTab = 'prs';
+let bugsLoaded = false;
 
 // ── Navigation ───────────────────────────────────────────────────
 function showView(view) {
@@ -104,6 +119,12 @@ patSubmit.addEventListener('click', async () => {
     setTimeout(() => {
       showView(prListView);
       subtitleEl.textContent = orgUrl.replace('https://dev.azure.com/', '');
+      if (!bugsLoaded) {
+        bugsLoaded = true;
+        window.lgtm.refreshBugs().then((r) => {
+          if (r && r.success) renderBugList(r.bugs);
+        }).catch(() => {});
+      }
     }, 800);
   } else {
     setPatMsg(result.error, 'error');
@@ -281,7 +302,19 @@ function renderPrList(prs) {
           badge.textContent = reviewStatus === 'cloning' ? 'cloning\u2026' : reviewStatus;
           actions.appendChild(badge);
 
-          if (reviewStatus === 'running' || reviewStatus === 'completed' || reviewStatus === 'failed' || reviewStatus === 'cloning') {
+          if (reviewStatus === 'running' || reviewStatus === 'cloning') {
+            const cancelBtn = document.createElement('button');
+            cancelBtn.className = 'btn-cancel-review';
+            cancelBtn.textContent = '✕';  // ✕
+            cancelBtn.title = 'Cancel review';
+            cancelBtn.addEventListener('click', (e) => {
+              e.stopPropagation();
+              cancelReview(key);
+            });
+            actions.appendChild(cancelBtn);
+          }
+
+          if (reviewStatus === 'running' || reviewStatus === 'completed' || reviewStatus === 'failed' || reviewStatus === 'cloning' || reviewStatus === 'cancelled') {
             const viewBtn = document.createElement('button');
             viewBtn.className = 'btn-view-review';
             viewBtn.textContent = '\u25B8';  // ▸
@@ -533,13 +566,39 @@ async function startReview(pr) {
   }
 }
 
+// ── Cancel review ────────────────────────────────────────────────
+async function cancelReview(key) {
+  const result = await window.lgtm.cancelReview(key);
+  if (!result.success) {
+    console.warn('[LGTM] Cancel failed:', result.error);
+    return;
+  }
+  if (reviewStatuses[key]) {
+    reviewStatuses[key].status = 'cancelled';
+  }
+  renderPrList(currentPrs);
+  if (activeDetailKey === key) {
+    reviewDetailDot.className = 'status-dot cancelled';
+    reviewDetailCancelBtn.classList.add('hidden');
+  }
+}
+
 // ── Review detail panel ──────────────────────────────────────────
+function updateDetailCancelVisibility(status) {
+  if (status === 'running' || status === 'cloning') {
+    reviewDetailCancelBtn.classList.remove('hidden');
+  } else {
+    reviewDetailCancelBtn.classList.add('hidden');
+  }
+}
+
 async function openReviewDetail(key, pr, status, agentId) {
   activeDetailKey = key;
 
   reviewDetailTitle.textContent = `${pr.repo}/#${pr.id}`;
   reviewDetailMeta.textContent = `${pr.title} · ${agentId || 'unknown'}`;
   reviewDetailDot.className = `status-dot ${status}`;
+  updateDetailCancelVisibility(status);
 
   // Load existing output
   const existingOutput = await window.lgtm.getReviewOutput(key);
@@ -578,15 +637,119 @@ reviewBackBtn.addEventListener('click', () => {
   showView(prListView);
 });
 
-// ── Refresh ──────────────────────────────────────────────────────
+reviewDetailCancelBtn.addEventListener('click', () => {
+  if (activeDetailKey) cancelReview(activeDetailKey);
+});
+
+// ── Refresh (refreshes the active tab) ───────────────────────────
 refreshBtn.addEventListener('click', async () => {
   refreshBtn.disabled = true;
   refreshBtn.textContent = '⟳';
-  const result = await window.lgtm.refreshPrs();
-  if (result.success) renderPrList(result.prs);
-  refreshBtn.disabled = false;
-  refreshBtn.textContent = '↻';
+  try {
+    if (activeTab === 'bugs') {
+      const result = await window.lgtm.refreshBugs();
+      if (result.success) renderBugList(result.bugs);
+    } else {
+      const result = await window.lgtm.refreshPrs();
+      if (result.success) renderPrList(result.prs);
+    }
+  } finally {
+    refreshBtn.disabled = false;
+    refreshBtn.textContent = '↻';
+  }
 });
+
+// ── Tabs ─────────────────────────────────────────────────────────
+function setActiveTab(tab) {
+  activeTab = tab;
+  const isPrs = tab === 'prs';
+
+  tabPrsBtn.classList.toggle('active', isPrs);
+  tabPrsBtn.setAttribute('aria-selected', isPrs ? 'true' : 'false');
+  tabBugsBtn.classList.toggle('active', !isPrs);
+  tabBugsBtn.setAttribute('aria-selected', !isPrs ? 'true' : 'false');
+
+  tabPanePrs.classList.toggle('hidden', !isPrs);
+  tabPaneBugs.classList.toggle('hidden', isPrs);
+
+  if (!isPrs && !bugsLoaded) {
+    bugsLoaded = true;
+    refreshBugs();
+  }
+}
+
+tabPrsBtn.addEventListener('click', () => setActiveTab('prs'));
+tabBugsBtn.addEventListener('click', () => setActiveTab('bugs'));
+
+// ── Bugs: render & refresh ───────────────────────────────────────
+function renderBugList(bugs) {
+  currentBugs = bugs || [];
+  bugListEl.innerHTML = '';
+
+  // Update tab count badge
+  if (currentBugs.length > 0) {
+    bugsTabCount.textContent = currentBugs.length;
+    bugsTabCount.classList.remove('hidden');
+  } else {
+    bugsTabCount.classList.add('hidden');
+  }
+
+  if (currentBugs.length === 0) {
+    bugListEl.classList.add('hidden');
+    noBugsEl.classList.remove('hidden');
+    return;
+  }
+  bugListEl.classList.remove('hidden');
+  noBugsEl.classList.add('hidden');
+
+  currentBugs.forEach((bug) => {
+    const sevClass = bug.severity && bug.severity.startsWith('1') ? 'critical'
+                    : bug.severity && bug.severity.startsWith('2') ? 'high'
+                    : '';
+    const sevLabel = sevClass === 'critical' ? 'Critical'
+                    : sevClass === 'high' ? 'High'
+                    : (bug.severity || '—');
+
+    const ageMs = bug.createdDate ? (Date.now() - new Date(bug.createdDate).getTime()) : 0;
+    const ageDays = Math.floor(ageMs / (24 * 60 * 60 * 1000));
+    const ageStr = ageDays === 0 ? 'today' : ageDays === 1 ? '1d ago' : `${ageDays}d ago`;
+
+    const item = document.createElement('div');
+    item.className = 'pr-item';
+
+    const sev = document.createElement('span');
+    sev.className = `bug-sev ${sevClass}`;
+    sev.textContent = sevLabel;
+
+    const info = document.createElement('div');
+    info.className = 'pr-info';
+    const assignee = bug.assignedTo ? esc(bug.assignedTo) : 'Unassigned';
+    info.innerHTML = `
+      <div class="pr-path">#${bug.id} ${esc(bug.title)}</div>
+      <div class="pr-title">${esc(bug.project)} · ${esc(bug.state)} · ${assignee} · ${ageStr}</div>
+    `;
+
+    item.appendChild(sev);
+    item.appendChild(info);
+
+    item.addEventListener('click', () => {
+      if (bug.webUrl) window.lgtm.openExternal(bug.webUrl);
+    });
+
+    bugListEl.appendChild(item);
+  });
+}
+
+async function refreshBugs() {
+  bugListEl.innerHTML = '<div class="loading">Loading bugs…</div>';
+  noBugsEl.classList.add('hidden');
+  const result = await window.lgtm.refreshBugs();
+  if (result.success) {
+    renderBugList(result.bugs);
+  } else {
+    bugListEl.innerHTML = `<div class="loading">Failed to load bugs: ${esc(result.error || '')}</div>`;
+  }
+}
 
 // ── Auto-review button ──────────────────────────────────────────
 document.getElementById('auto-review-btn').addEventListener('click', () => {
@@ -899,6 +1062,10 @@ disconnectBtn.addEventListener('click', async () => {
     await window.lgtm.clearPat();
     reviewStatuses = {};
     knownRepos.clear();
+    currentBugs = [];
+    bugsLoaded = false;
+    bugsTabCount.classList.add('hidden');
+    setActiveTab('prs');
     showView(patSetup);
     subtitleEl.textContent = '';
   }
@@ -913,6 +1080,13 @@ window.lgtm.onPatStatus(async (status) => {
     await loadAgents();
     showView(prListView);
     subtitleEl.textContent = (status.orgUrl || '').replace('https://dev.azure.com/', '');
+    // Background-prefetch bugs so the tab badge populates without a click.
+    if (!bugsLoaded) {
+      bugsLoaded = true;
+      window.lgtm.refreshBugs().then((result) => {
+        if (result && result.success) renderBugList(result.bugs);
+      }).catch(() => {});
+    }
   } else {
     showView(patSetup);
   }
@@ -927,6 +1101,7 @@ window.lgtm.onReviewUpdate((data) => {
   // Update detail panel if it's showing this review
   if (activeDetailKey === data.key) {
     reviewDetailDot.className = `status-dot ${data.status}`;
+    updateDetailCancelVisibility(data.status);
   }
 });
 

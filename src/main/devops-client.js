@@ -172,6 +172,100 @@ class DevOpsClient {
     return res.data.value || [];
   }
 
+  // ── Work Items: Critical/High Bugs ───────────────────────────────
+
+  /**
+   * Fetch all open bugs across every project where Severity is
+   * "1 - Critical" or "2 - High" and the bug is not in a terminal state.
+   * Returns a flat array of normalised bug objects.
+   */
+  async getCriticalBugs() {
+    let projects = await this.getProjects();
+
+    if (this.projectFilter) {
+      projects = projects.filter(
+        (p) => p.name.toLowerCase() === this.projectFilter.toLowerCase(),
+      );
+    }
+
+    const wiql = {
+      query: `
+        SELECT [System.Id]
+        FROM WorkItems
+        WHERE [System.WorkItemType] = 'Bug'
+          AND [Microsoft.VSTS.Common.Severity] IN ('1 - Critical', '2 - High')
+          AND [System.State] NOT IN ('Closed', 'Resolved', 'Done', 'Removed')
+        ORDER BY [Microsoft.VSTS.Common.Severity] ASC, [System.CreatedDate] DESC
+      `.trim(),
+    };
+
+    const allBugs = [];
+
+    for (const project of projects) {
+      try {
+        const wiqlRes = await this.api.post(
+          `/${encodeURIComponent(project.name)}/_apis/wit/wiql`,
+          wiql,
+          { params: { 'api-version': API_VERSION } },
+        );
+        const ids = (wiqlRes.data.workItems || []).map((w) => w.id);
+        if (ids.length === 0) continue;
+
+        // Batch work-item fetches in chunks of 200 (ADO limit).
+        const fields = [
+          'System.Id',
+          'System.Title',
+          'System.State',
+          'System.TeamProject',
+          'System.AssignedTo',
+          'System.CreatedDate',
+          'System.CreatedBy',
+          'Microsoft.VSTS.Common.Severity',
+          'Microsoft.VSTS.Common.Priority',
+        ];
+
+        for (let i = 0; i < ids.length; i += 200) {
+          const chunk = ids.slice(i, i + 200);
+          const detailRes = await this.api.get('/_apis/wit/workitems', {
+            params: {
+              ids: chunk.join(','),
+              fields: fields.join(','),
+              'api-version': API_VERSION,
+            },
+          });
+          for (const wi of detailRes.data.value || []) {
+            const f = wi.fields || {};
+            allBugs.push({
+              id: wi.id,
+              title: f['System.Title'] || '',
+              state: f['System.State'] || '',
+              severity: f['Microsoft.VSTS.Common.Severity'] || '',
+              priority: f['Microsoft.VSTS.Common.Priority'] || null,
+              project: f['System.TeamProject'] || project.name,
+              assignedTo: f['System.AssignedTo']?.displayName || '',
+              createdBy: f['System.CreatedBy']?.displayName || '',
+              createdDate: f['System.CreatedDate'] || '',
+              webUrl: `${this.orgUrl}/${encodeURIComponent(f['System.TeamProject'] || project.name)}/_workitems/edit/${wi.id}`,
+            });
+          }
+        }
+      } catch {
+        // skip projects we can't read (WIQL may 403/404 for some processes)
+      }
+    }
+
+    // Sort: Critical first, then High; within each, newest first.
+    const sevRank = (s) => (s && s.startsWith('1') ? 0 : s && s.startsWith('2') ? 1 : 2);
+    allBugs.sort((a, b) => {
+      const sa = sevRank(a.severity);
+      const sb = sevRank(b.severity);
+      if (sa !== sb) return sa - sb;
+      return new Date(b.createdDate) - new Date(a.createdDate);
+    });
+
+    return allBugs;
+  }
+
   // ── Repo file tree (for autocomplete) ────────────────────────────
 
   /**

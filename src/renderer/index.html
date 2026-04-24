@@ -52,21 +52,45 @@
     </div>
   </section>
 
-  <!-- ─── Main PR list ────────────────────────────────────── -->
+  <!-- ─── Main view: PRs + Bugs tabs ──────────────────────── -->
   <section id="pr-list-view" class="view hidden">
+    <!-- Global toolbar: applies to all tabs -->
     <div class="toolbar">
       <select id="agent-select" class="agent-select" title="Select review agent"></select>
       <button id="auto-review-btn" class="btn-auto-review" title="Auto-review all PRs (starred repos first)">&#9654;</button>
-      <button id="refresh-btn" class="btn-icon" title="Refresh PRs">↻</button>
+      <button id="refresh-btn" class="btn-icon" title="Refresh">↻</button>
       <button id="settings-btn" class="btn-icon" title="Settings">⚙</button>
     </div>
 
-    <div id="pr-list" class="pr-list">
-      <div class="loading">Loading PRs…</div>
+    <div class="tab-strip" role="tablist">
+      <button id="tab-prs" class="tab active" role="tab" aria-selected="true">Pull Requests</button>
+      <button id="tab-bugs" class="tab" role="tab" aria-selected="false">
+        Bugs <span id="bugs-tab-count" class="tab-count hidden">0</span>
+      </button>
     </div>
 
-    <div id="no-prs" class="empty-state hidden">
-      <p>No open pull requests found.</p>
+    <!-- Tab pane: PRs -->
+    <div id="tab-pane-prs" class="tab-pane">
+      <div id="pr-list" class="pr-list">
+        <div class="loading">Loading PRs…</div>
+      </div>
+
+      <div id="no-prs" class="empty-state hidden">
+        <p>No open pull requests found.</p>
+      </div>
+    </div>
+
+    <!-- Tab pane: Bugs -->
+    <div id="tab-pane-bugs" class="tab-pane hidden">
+      <div class="bugs-hint">Showing bugs with severity <strong>Critical</strong> or <strong>High</strong></div>
+
+      <div id="bug-list" class="pr-list">
+        <div class="loading">Loading bugs…</div>
+      </div>
+
+      <div id="no-bugs" class="empty-state hidden">
+        <p>No open critical or high bugs.</p>
+      </div>
     </div>
   </section>
 
@@ -78,6 +102,7 @@
         <span id="review-detail-title" class="review-detail-title"></span>
         <span id="review-detail-meta" class="review-detail-meta"></span>
       </div>
+      <button id="review-detail-cancel-btn" class="btn-cancel-review hidden" title="Cancel review">&#10005;</button>
       <div id="review-detail-dot" class="status-dot"></div>
     </div>
     <div id="review-output" class="review-output"></div>

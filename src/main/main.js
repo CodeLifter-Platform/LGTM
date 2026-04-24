@@ -272,6 +272,18 @@ ipcMain.handle('refresh-prs', async () => {
   }
 });
 
+// ── IPC: Bugs ────────────────────────────────────────────────────────
+
+ipcMain.handle('refresh-bugs', async () => {
+  if (!devopsClient) return { success: false, error: 'Not authenticated' };
+  try {
+    const bugs = await devopsClient.getCriticalBugs();
+    return { success: true, bugs };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
 // ── IPC: Reviews ─────────────────────────────────────────────────────
 
 ipcMain.handle('review-pr', async (_event, { pr, agentId, model }) => {
@@ -282,6 +294,10 @@ ipcMain.handle('review-pr', async (_event, { pr, agentId, model }) => {
 
 ipcMain.handle('get-reviews', () => {
   return agentRunner.getActiveReviews();
+});
+
+ipcMain.handle('cancel-review', (_event, key) => {
+  return agentRunner.cancelReview(key);
 });
 
 ipcMain.handle('get-review-output', (_event, key) => {
@@ -344,6 +360,16 @@ ipcMain.handle('get-repo-file-tree', async (_event, { project, repoName }) => {
     console.error(`[LGTM] Failed to fetch file tree for ${project}/${repoName}:`, err.message);
     return { success: false, error: err.message, files: [] };
   }
+});
+
+// ── IPC: External URL ────────────────────────────────────────────────
+
+ipcMain.handle('open-external', (_event, url) => {
+  if (typeof url !== 'string') return { success: false };
+  // Only allow http(s) to avoid opening arbitrary schemes from the renderer.
+  if (!/^https?:\/\//i.test(url)) return { success: false };
+  shell.openExternal(url);
+  return { success: true };
 });
 
 // ── IPC: Auto-updater ──────────────────────────────────────────────

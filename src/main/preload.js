@@ -7,7 +7,15 @@ contextBridge.exposeInMainWorld('lgtm', {
 
   // PRs
   refreshPrs: () => ipcRenderer.invoke('refresh-prs'),
+
+  // Bugs
+  refreshBugs: () => ipcRenderer.invoke('refresh-bugs'),
+
+  // External
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
+
   reviewPr: ({ pr, agentId, model }) => ipcRenderer.invoke('review-pr', { pr, agentId, model }),
+  cancelReview: (key) => ipcRenderer.invoke('cancel-review', key),
   getReviews: () => ipcRenderer.invoke('get-reviews'),
   getReviewOutput: (key) => ipcRenderer.invoke('get-review-output', key),
 

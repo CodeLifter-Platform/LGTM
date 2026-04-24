@@ -66,6 +66,8 @@ class AgentRunner {
       output: '',
       startedAt: Date.now(),
       cleanup: null,
+      child: null,
+      cancelled: false,
     };
     this.activeReviews.set(key, review);
     this._notifyRenderer(key, review);
@@ -79,6 +81,15 @@ class AgentRunner {
       const { clonePath, cleanup } = await this.cloner.clone(pr);
       review.cleanup = cleanup;
       review.clonePath = clonePath;
+
+      // If cancelled while cloning, abort before spawning the agent.
+      if (review.cancelled) {
+        review.status = 'cancelled';
+        review.finishedAt = Date.now();
+        this._notifyRenderer(key, review);
+        if (review.cleanup) review.cleanup();
+        return { success: true, cancelled: true };
+      }
 
       // ── Step 2: Build the review prompt ───────────────────────
 
@@ -189,6 +200,7 @@ class AgentRunner {
         shell: false,
         env: { ...process.env },
       });
+      review.child = child;
 
       // Pipe the prompt via stdin then close it
       if (stdinPrompt && child.stdin) {
@@ -216,10 +228,14 @@ class AgentRunner {
       });
 
       child.on('close', (code) => {
-        review.status = code === 0 ? 'completed' : 'failed';
+        if (review.cancelled) {
+          review.status = 'cancelled';
+        } else {
+          review.status = code === 0 ? 'completed' : 'failed';
+        }
         review.finishedAt = Date.now();
         this._notifyRenderer(key, review);
-        console.log(`[LGTM] Review ${key} finished with code ${code}`);
+        console.log(`[LGTM] Review ${key} finished with code ${code}${review.cancelled ? ' (cancelled)' : ''}`);
 
         // ── Step 5: Cleanup ────────────────────────────────
         if (review.cleanup) {
@@ -248,6 +264,41 @@ class AgentRunner {
       if (review.cleanup) review.cleanup();
       return { success: false, error: err.message };
     }
+  }
+
+  /**
+   * Cancel an in-progress review. If the agent child process is running,
+   * it is sent SIGTERM, then SIGKILL if it doesn't exit within 2s. If the
+   * review is still cloning, the cancel flag aborts the spawn.
+   */
+  cancelReview(key) {
+    const review = this.activeReviews.get(key);
+    if (!review) return { success: false, error: 'Review not found.' };
+    if (review.status !== 'running' && review.status !== 'cloning') {
+      return { success: false, error: `Cannot cancel review in status "${review.status}".` };
+    }
+
+    review.cancelled = true;
+    review.output += '\n[LGTM] Review cancelled by user.\n';
+
+    const child = review.child;
+    if (child && child.exitCode === null && !child.killed) {
+      try { child.kill('SIGTERM'); } catch { /* ignore */ }
+      setTimeout(() => {
+        if (child.exitCode === null && !child.killed) {
+          try { child.kill('SIGKILL'); } catch { /* ignore */ }
+        }
+      }, 2000);
+    }
+
+    // If still cloning, proactively mark cancelled so the UI updates now.
+    // The cloning branch in startReview will bail out and trigger cleanup
+    // once the clone finishes.
+    if (review.status === 'cloning') {
+      this._notifyRenderer(key, review);
+    }
+
+    return { success: true };
   }
 
   /**
