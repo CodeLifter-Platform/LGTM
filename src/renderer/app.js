@@ -24,13 +24,41 @@ const agentSelect   = $('#agent-select');
 // Tabs
 const tabPrsBtn     = $('#tab-prs');
 const tabBugsBtn    = $('#tab-bugs');
+const tabTicketsBtn = $('#tab-tickets');
 const tabPanePrs    = $('#tab-pane-prs');
 const tabPaneBugs   = $('#tab-pane-bugs');
+const tabPaneTickets = $('#tab-pane-tickets');
 const bugsTabCount  = $('#bugs-tab-count');
+const ticketsTabCount = $('#tickets-tab-count');
 
 // Bugs
 const bugListEl     = $('#bug-list');
 const noBugsEl      = $('#no-bugs');
+
+// Tickets
+const ticketListEl  = $('#ticket-list');
+const noTicketsEl   = $('#no-tickets');
+
+// Per-tab toolbars
+const bugsAgentSelect      = $('#bugs-agent-select');
+const bugsSettingsBtn      = $('#bugs-settings-btn');
+const ticketsAgentSelect   = $('#tickets-agent-select');
+const ticketsSettingsBtn   = $('#tickets-settings-btn');
+
+// Per-tab settings views
+const bugsSettingsView     = $('#bugs-settings-view');
+const bugsAgentConfigList  = $('#bugs-agent-config-list');
+const bugsRepoPromptList   = $('#bugs-repo-prompt-list');
+const bugsAddRepoBtn       = $('#bugs-add-repo-btn');
+const bugsSettingsSave     = $('#bugs-settings-save');
+const bugsSettingsBack     = $('#bugs-settings-back');
+
+const ticketsSettingsView    = $('#tickets-settings-view');
+const ticketsAgentConfigList = $('#tickets-agent-config-list');
+const ticketsRepoPromptList  = $('#tickets-repo-prompt-list');
+const ticketsAddRepoBtn      = $('#tickets-add-repo-btn');
+const ticketsSettingsSave    = $('#tickets-settings-save');
+const ticketsSettingsBack    = $('#tickets-settings-back');
 
 // Review detail
 const reviewBackBtn     = $('#review-back-btn');
@@ -63,15 +91,78 @@ let repoConfigs = {};
 let starredRepos = new Set(); // "project/repo" strings — starred repos float to top & auto-review first
 let maxPrAgeDays = 7;        // only auto-review PRs within this age
 let activeDetailKey = null;  // which review is shown in the detail panel
+let detailSourceTab = 'prs'; // which tab to return to when back is clicked
 let knownRepos = new Set();  // "project/repo" strings from PR list
 let autoReviewRunning = false;
 let currentBugs = [];
 let activeTab = 'prs';
 let bugsLoaded = false;
+let currentTickets = [];
+let ticketsLoaded = false;
+let collapsedBugProjects = {};     // project → boolean (true = collapsed)
+let collapsedTicketProjects = {};  // project → boolean (true = collapsed)
+let revealedRows = new Set();       // row keys currently showing Play/dismiss
+let lastUsedRepos = {};             // { project: repoName } — remembered picker default
+let repoCache = {};                 // { project: [{ id, name }] } — per-session repo list
+
+// Authenticated user (so we can flag "my PRs")
+let currentUser = null;
+let prModeOverrides = {};  // "project/repo/id" → 'review' | 'resolve'
+try {
+  prModeOverrides = JSON.parse(localStorage.getItem('lgtm-pr-modes') || '{}');
+} catch { prModeOverrides = {}; }
+
+function savePrModes() {
+  try { localStorage.setItem('lgtm-pr-modes', JSON.stringify(prModeOverrides)); } catch { /* ignore */ }
+}
+
+function defaultPrMode(pr) {
+  if (currentUser && pr.createdBy && pr.createdBy === currentUser.displayName) {
+    return 'resolve';
+  }
+  return 'review';
+}
+
+function getPrMode(pr) {
+  const key = `${pr.project}/${pr.repo}/${pr.id}`;
+  return prModeOverrides[key] || defaultPrMode(pr);
+}
+
+function togglePrMode(pr) {
+  const key = `${pr.project}/${pr.repo}/${pr.id}`;
+  const current = getPrMode(pr);
+  prModeOverrides[key] = current === 'review' ? 'resolve' : 'review';
+  savePrModes();
+}
+
+// Per-tab agent + prompt config
+let bugsSelectedAgent = null;
+let bugsAgentModels = {};
+let bugsRepoConfigs = {};           // { "project/repo": "relative/prompt.md" }
+let ticketsSelectedAgent = null;
+let ticketsAgentModels = {};
+let ticketsRepoConfigs = {};
+
+// ── Theme toggle ─────────────────────────────────────────────────
+const themeToggleBtn = $('#theme-toggle');
+function applyThemeIcon() {
+  const isLight = document.documentElement.classList.contains('light');
+  // ☀ sun when light (click → dark), ☾ crescent when dark (click → light)
+  themeToggleBtn.innerHTML = isLight ? '&#9728;' : '&#9790;';
+  themeToggleBtn.title = isLight ? 'Switch to dark mode' : 'Switch to light mode';
+}
+themeToggleBtn.addEventListener('click', () => {
+  const nextIsLight = !document.documentElement.classList.contains('light');
+  document.documentElement.classList.toggle('light', nextIsLight);
+  try { localStorage.setItem('lgtm-theme', nextIsLight ? 'light' : 'dark'); } catch { /* ignore */ }
+  applyThemeIcon();
+});
+applyThemeIcon();
 
 // ── Navigation ───────────────────────────────────────────────────
 function showView(view) {
-  [patSetup, prListView, settingsView, reviewDetailView].forEach((v) => v.classList.add('hidden'));
+  [patSetup, prListView, settingsView, reviewDetailView, bugsSettingsView, ticketsSettingsView]
+    .forEach((v) => v.classList.add('hidden'));
   view.classList.remove('hidden');
 }
 
@@ -84,8 +175,46 @@ async function loadAgents() {
   repoConfigs = settings.repoConfigs || {};
   starredRepos = new Set(settings.starredRepos || []);
   maxPrAgeDays = settings.maxPrAgeDays || 7;
+  lastUsedRepos = settings.lastUsedRepos || {};
+
+  // Per-tab agent + prompt config
+  bugsSelectedAgent = settings.bugsAgent || selectedAgent;
+  bugsAgentModels = settings.bugsAgentModels || {};
+  bugsRepoConfigs = settings.bugsRepoConfigs || {};
+  ticketsSelectedAgent = settings.ticketsAgent || selectedAgent;
+  ticketsAgentModels = settings.ticketsAgentModels || {};
+  ticketsRepoConfigs = settings.ticketsRepoConfigs || {};
+
   renderAgentSelect();
+  renderTabAgentSelects();
 }
+
+function renderTabAgentSelects() {
+  [
+    { el: bugsAgentSelect,    current: bugsSelectedAgent,    setter: (v) => (bugsSelectedAgent = v) },
+    { el: ticketsAgentSelect, current: ticketsSelectedAgent, setter: (v) => (ticketsSelectedAgent = v) },
+  ].forEach(({ el, current }) => {
+    if (!el) return;
+    el.innerHTML = '';
+    agents.forEach((agent) => {
+      const opt = document.createElement('option');
+      opt.value = agent.id;
+      opt.textContent = agent.name + (agent.available ? '' : ' (not installed)');
+      opt.disabled = !agent.available;
+      if (agent.id === current) opt.selected = true;
+      el.appendChild(opt);
+    });
+  });
+}
+
+bugsAgentSelect && bugsAgentSelect.addEventListener('change', async () => {
+  bugsSelectedAgent = bugsAgentSelect.value;
+  await window.lgtm.saveSettings({ bugsAgent: bugsSelectedAgent });
+});
+ticketsAgentSelect && ticketsAgentSelect.addEventListener('change', async () => {
+  ticketsSelectedAgent = ticketsAgentSelect.value;
+  await window.lgtm.saveSettings({ ticketsAgent: ticketsSelectedAgent });
+});
 
 function renderAgentSelect() {
   agentSelect.innerHTML = '';
@@ -123,6 +252,12 @@ patSubmit.addEventListener('click', async () => {
         bugsLoaded = true;
         window.lgtm.refreshBugs().then((r) => {
           if (r && r.success) renderBugList(r.bugs);
+        }).catch(() => {});
+      }
+      if (!ticketsLoaded) {
+        ticketsLoaded = true;
+        window.lgtm.refreshWorkItems().then((r) => {
+          if (r && r.success) renderTicketList(r.items);
         }).catch(() => {});
       }
     }, 800);
@@ -287,9 +422,11 @@ function renderPrList(prs) {
         // Info — show just PR number + title since repo is in the header
         const info = document.createElement('div');
         info.className = 'pr-info';
+        const showRunning = reviewStatus === 'running' || reviewStatus === 'cloning';
         info.innerHTML = `
           <div class="pr-path">#${pr.id} ${esc(pr.title)}</div>
           <div class="pr-title">by ${esc(pr.createdBy)} · ${ageStr}</div>
+          ${showRunning ? `<div class="pr-running-line" data-running-key="${esc(key)}">${esc(statusLineFor(key))}</div>` : ''}
         `;
 
         // Badge + view button for active reviews
@@ -325,18 +462,63 @@ function renderPrList(prs) {
             });
             actions.appendChild(viewBtn);
           }
+        } else {
+          // Mode chip — visible whenever no review is active. Click toggles.
+          const mode = getPrMode(pr);
+          const modeChip = document.createElement('button');
+          modeChip.className = `pr-mode-chip ${mode}`;
+          modeChip.textContent = mode;
+          modeChip.title = mode === 'resolve'
+            ? 'Resolve mode: address review comments and push back. Click to switch to review.'
+            : 'Review mode: post review comments. Click to switch to resolve.';
+          modeChip.addEventListener('click', (e) => {
+            e.stopPropagation();
+            togglePrMode(pr);
+            renderPrList(currentPrs);
+          });
+          actions.appendChild(modeChip);
+        }
+
+        if (!reviewStatus && revealedRows.has(key)) {
+          // Reveal state: Play + dismiss
+          const mode = getPrMode(pr);
+          const playBtn = document.createElement('button');
+          playBtn.className = 'btn-play-row';
+          playBtn.textContent = '▶';  // ▶
+          playBtn.title = mode === 'resolve' ? 'Address review comments and push' : 'Start review';
+          playBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            revealedRows.delete(key);
+            startReview(pr);
+          });
+          actions.appendChild(playBtn);
+
+          const dismissBtn = document.createElement('button');
+          dismissBtn.className = 'btn-dismiss-row';
+          dismissBtn.textContent = '✕';  // ✕
+          dismissBtn.title = 'Cancel';
+          dismissBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            revealedRows.delete(key);
+            renderPrList(currentPrs);
+          });
+          actions.appendChild(dismissBtn);
         }
 
         item.appendChild(dot);
         item.appendChild(info);
         item.appendChild(actions);
 
-        // Click to start review (only if not already running)
+        // Click: if a review exists, open the detail; otherwise toggle reveal.
         item.addEventListener('click', () => {
-          if (reviewStatus === 'running' || reviewStatus === 'cloning') {
+          if (reviewStatus) {
             openReviewDetail(key, pr, reviewStatus, reviewAgent);
+          } else if (revealedRows.has(key)) {
+            revealedRows.delete(key);
+            renderPrList(currentPrs);
           } else {
-            startReview(pr);
+            revealedRows.add(key);
+            renderPrList(currentPrs);
           }
         });
 
@@ -552,12 +734,13 @@ async function startReview(pr) {
 
   const agentId = selectedAgent || 'claude';
   const model = agentModels[agentId] || null;
+  const mode = getPrMode(pr);
 
   // Optimistically show cloning state
   reviewStatuses[key] = { status: 'cloning', agentId, output: '' };
   renderPrList(currentPrs);
 
-  const result = await window.lgtm.reviewPr({ pr, agentId, model });
+  const result = await window.lgtm.reviewPr({ pr, agentId, model, mode });
   if (!result.success) {
     reviewStatuses[key].status = 'failed';
     reviewStatuses[key].output = result.error || 'Failed to start review.';
@@ -576,10 +759,19 @@ async function cancelReview(key) {
   if (reviewStatuses[key]) {
     reviewStatuses[key].status = 'cancelled';
   }
-  renderPrList(currentPrs);
+  rerenderForKey(key);
   if (activeDetailKey === key) {
     reviewDetailDot.className = 'status-dot cancelled';
     reviewDetailCancelBtn.classList.add('hidden');
+  }
+}
+
+function rerenderForKey(key) {
+  if (key && key.includes('/wi-')) {
+    if (currentBugs.length)    renderBugList(currentBugs);
+    if (currentTickets.length) renderTicketList(currentTickets);
+  } else {
+    renderPrList(currentPrs);
   }
 }
 
@@ -594,8 +786,10 @@ function updateDetailCancelVisibility(status) {
 
 async function openReviewDetail(key, pr, status, agentId) {
   activeDetailKey = key;
+  detailSourceTab = activeTab;  // remember which tab to return to
 
-  reviewDetailTitle.textContent = `${pr.repo}/#${pr.id}`;
+  const titleLeft = pr.repo ? `${pr.repo}/#${pr.id}` : `#${pr.id}`;
+  reviewDetailTitle.textContent = titleLeft;
   reviewDetailMeta.textContent = `${pr.title} · ${agentId || 'unknown'}`;
   reviewDetailDot.className = `status-dot ${status}`;
   updateDetailCancelVisibility(status);
@@ -634,6 +828,7 @@ function renderMarkdown(text) {
 
 reviewBackBtn.addEventListener('click', () => {
   activeDetailKey = null;
+  setActiveTab(detailSourceTab || 'prs');
   showView(prListView);
 });
 
@@ -649,6 +844,9 @@ refreshBtn.addEventListener('click', async () => {
     if (activeTab === 'bugs') {
       const result = await window.lgtm.refreshBugs();
       if (result.success) renderBugList(result.bugs);
+    } else if (activeTab === 'tickets') {
+      const result = await window.lgtm.refreshWorkItems();
+      if (result.success) renderTicketList(result.items);
     } else {
       const result = await window.lgtm.refreshPrs();
       if (result.success) renderPrList(result.prs);
@@ -662,24 +860,31 @@ refreshBtn.addEventListener('click', async () => {
 // ── Tabs ─────────────────────────────────────────────────────────
 function setActiveTab(tab) {
   activeTab = tab;
-  const isPrs = tab === 'prs';
+  const tabs = [
+    { key: 'prs',     btn: tabPrsBtn,     pane: tabPanePrs },
+    { key: 'bugs',    btn: tabBugsBtn,    pane: tabPaneBugs },
+    { key: 'tickets', btn: tabTicketsBtn, pane: tabPaneTickets },
+  ];
+  tabs.forEach(({ key, btn, pane }) => {
+    const active = key === tab;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    pane.classList.toggle('hidden', !active);
+  });
 
-  tabPrsBtn.classList.toggle('active', isPrs);
-  tabPrsBtn.setAttribute('aria-selected', isPrs ? 'true' : 'false');
-  tabBugsBtn.classList.toggle('active', !isPrs);
-  tabBugsBtn.setAttribute('aria-selected', !isPrs ? 'true' : 'false');
-
-  tabPanePrs.classList.toggle('hidden', !isPrs);
-  tabPaneBugs.classList.toggle('hidden', isPrs);
-
-  if (!isPrs && !bugsLoaded) {
+  if (tab === 'bugs' && !bugsLoaded) {
     bugsLoaded = true;
     refreshBugs();
+  }
+  if (tab === 'tickets' && !ticketsLoaded) {
+    ticketsLoaded = true;
+    refreshTickets();
   }
 }
 
 tabPrsBtn.addEventListener('click', () => setActiveTab('prs'));
 tabBugsBtn.addEventListener('click', () => setActiveTab('bugs'));
+tabTicketsBtn.addEventListener('click', () => setActiveTab('tickets'));
 
 // ── Bugs: render & refresh ───────────────────────────────────────
 function renderBugList(bugs) {
@@ -702,41 +907,50 @@ function renderBugList(bugs) {
   bugListEl.classList.remove('hidden');
   noBugsEl.classList.add('hidden');
 
+  // Group by project, preserving the priority-sorted order from the backend.
+  const groups = {};
   currentBugs.forEach((bug) => {
-    const sevClass = bug.severity && bug.severity.startsWith('1') ? 'critical'
-                    : bug.severity && bug.severity.startsWith('2') ? 'high'
-                    : '';
-    const sevLabel = sevClass === 'critical' ? 'Critical'
-                    : sevClass === 'high' ? 'High'
-                    : (bug.severity || '—');
+    if (!groups[bug.project]) groups[bug.project] = [];
+    groups[bug.project].push(bug);
+  });
 
-    const ageMs = bug.createdDate ? (Date.now() - new Date(bug.createdDate).getTime()) : 0;
-    const ageDays = Math.floor(ageMs / (24 * 60 * 60 * 1000));
-    const ageStr = ageDays === 0 ? 'today' : ageDays === 1 ? '1d ago' : `${ageDays}d ago`;
+  const projectNames = Object.keys(groups).sort((a, b) => a.localeCompare(b));
 
-    const item = document.createElement('div');
-    item.className = 'pr-item';
+  projectNames.forEach((project) => {
+    const items = groups[project];
+    const isCollapsed = collapsedBugProjects[project] || false;
 
-    const sev = document.createElement('span');
-    sev.className = `bug-sev ${sevClass}`;
-    sev.textContent = sevLabel;
+    const header = document.createElement('div');
+    header.className = 'repo-group-header';
 
-    const info = document.createElement('div');
-    info.className = 'pr-info';
-    const assignee = bug.assignedTo ? esc(bug.assignedTo) : 'Unassigned';
-    info.innerHTML = `
-      <div class="pr-path">#${bug.id} ${esc(bug.title)}</div>
-      <div class="pr-title">${esc(bug.project)} · ${esc(bug.state)} · ${assignee} · ${ageStr}</div>
-    `;
+    const chevron = document.createElement('span');
+    chevron.className = `repo-chevron${isCollapsed ? ' collapsed' : ''}`;
+    chevron.textContent = '▾';
 
-    item.appendChild(sev);
-    item.appendChild(info);
+    const name = document.createElement('span');
+    name.className = 'repo-group-name';
+    name.textContent = project;
 
-    item.addEventListener('click', () => {
-      if (bug.webUrl) window.lgtm.openExternal(bug.webUrl);
+    const count = document.createElement('span');
+    count.className = 'repo-group-count';
+    count.textContent = items.length;
+
+    header.appendChild(chevron);
+    header.appendChild(name);
+    header.appendChild(count);
+
+    header.addEventListener('click', () => {
+      collapsedBugProjects[project] = !collapsedBugProjects[project];
+      renderBugList(currentBugs);
     });
 
-    bugListEl.appendChild(item);
+    bugListEl.appendChild(header);
+
+    if (isCollapsed) return;
+
+    items.forEach((bug) => {
+      renderWorkItemRow(bugListEl, bug, 'Bug');
+    });
   });
 }
 
@@ -748,6 +962,396 @@ async function refreshBugs() {
     renderBugList(result.bugs);
   } else {
     bugListEl.innerHTML = `<div class="loading">Failed to load bugs: ${esc(result.error || '')}</div>`;
+  }
+}
+
+// ── Work item row (shared by Bugs & Tickets) ─────────────────────
+function findWorkItemReview(project, id) {
+  const suffix = `/wi-${id}`;
+  for (const k of Object.keys(reviewStatuses)) {
+    if (k.startsWith(`${project}/`) && k.endsWith(suffix)) {
+      return { key: k, review: reviewStatuses[k] };
+    }
+  }
+  return null;
+}
+
+function renderWorkItemRow(container, wi, typeLabel) {
+  const revealKey = `wi-${wi.project}-${wi.id}`;
+  const running = findWorkItemReview(wi.project, wi.id);
+  const reviewStatus = running ? running.review.status : null;
+  const reviewAgent = running ? running.review.agentId : null;
+  const runtimeKey = running ? running.key : null;
+
+  const pri = typeof wi.priority === 'number' ? wi.priority : null;
+  const priClass = pri ? `p${pri}` : 'pnone';
+  const priLabel = pri ? `P${pri}` : '—';
+
+  const row = document.createElement('div');
+  row.className = 'pr-item grouped';
+
+  const priEl = document.createElement('span');
+  priEl.className = `bug-pri ${priClass}`;
+  priEl.textContent = priLabel;
+  priEl.title = pri ? `Priority ${pri}` : 'No priority set';
+
+  const typeEl = document.createElement('span');
+  typeEl.className = `wi-type ${typeClassFor(typeLabel)}`;
+  typeEl.textContent = typeLabel;
+
+  // Meta line: state + optional sprint name + age
+  let meta = esc(wi.state || '');
+  if (!wi.isBacklog && wi.iterationName) meta = `${esc(wi.iterationName)} · ${meta}`;
+  if (wi.isBacklog) meta = `Backlog · ${meta}`;
+
+  const info = document.createElement('div');
+  info.className = 'pr-info';
+  const showRunning = reviewStatus === 'running' || reviewStatus === 'cloning';
+  info.innerHTML = `
+    <div class="pr-path">#${wi.id} ${esc(wi.title)}</div>
+    <div class="pr-title">${meta}</div>
+    ${showRunning && runtimeKey ? `<div class="pr-running-line" data-running-key="${esc(runtimeKey)}">${esc(statusLineFor(runtimeKey))}</div>` : ''}
+  `;
+
+  const actions = document.createElement('div');
+  actions.className = 'pr-actions';
+
+  if (reviewStatus) {
+    const badge = document.createElement('span');
+    badge.className = `pr-review-badge ${reviewStatus}`;
+    badge.textContent = reviewStatus === 'cloning' ? 'cloning…' : reviewStatus;
+    actions.appendChild(badge);
+
+    if (reviewStatus === 'running' || reviewStatus === 'cloning') {
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'btn-cancel-review';
+      cancelBtn.textContent = '✕';
+      cancelBtn.title = 'Cancel';
+      cancelBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        cancelReview(runtimeKey);
+      });
+      actions.appendChild(cancelBtn);
+    }
+
+    const viewBtn = document.createElement('button');
+    viewBtn.className = 'btn-view-review';
+    viewBtn.textContent = '▸';
+    viewBtn.title = 'View output';
+    viewBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openReviewDetail(runtimeKey, running.review.pr || wiAsPr(wi), reviewStatus, reviewAgent);
+    });
+    actions.appendChild(viewBtn);
+  } else if (revealedRows.has(revealKey)) {
+    const playBtn = document.createElement('button');
+    playBtn.className = 'btn-play-row';
+    playBtn.textContent = '▶';
+    playBtn.title = 'Start agent';
+    playBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openRepoPickerForWorkItem(wi, playBtn);
+    });
+    actions.appendChild(playBtn);
+
+    const dismissBtn = document.createElement('button');
+    dismissBtn.className = 'btn-dismiss-row';
+    dismissBtn.textContent = '✕';
+    dismissBtn.title = 'Cancel';
+    dismissBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      revealedRows.delete(revealKey);
+      rerenderActiveWorkItemList();
+    });
+    actions.appendChild(dismissBtn);
+  }
+
+  row.appendChild(priEl);
+  row.appendChild(typeEl);
+  row.appendChild(info);
+  row.appendChild(actions);
+
+  row.addEventListener('click', () => {
+    if (reviewStatus) {
+      openReviewDetail(runtimeKey, running.review.pr || wiAsPr(wi), reviewStatus, reviewAgent);
+    } else if (revealedRows.has(revealKey)) {
+      revealedRows.delete(revealKey);
+      rerenderActiveWorkItemList();
+    } else {
+      revealedRows.add(revealKey);
+      rerenderActiveWorkItemList();
+    }
+  });
+
+  container.appendChild(row);
+}
+
+function wiAsPr(wi) {
+  // Minimal shape so openReviewDetail renders a sensible header for a work item.
+  return {
+    id: wi.id,
+    title: wi.title,
+    project: wi.project,
+    repo: '',
+    webUrl: wi.webUrl,
+  };
+}
+
+function rerenderActiveWorkItemList() {
+  if (activeTab === 'bugs') renderBugList(currentBugs);
+  else if (activeTab === 'tickets') renderTicketList(currentTickets);
+}
+
+// ── Repo picker popover (for work-item agent actions) ────────────
+let openRepoPicker = null;
+
+async function openRepoPickerForWorkItem(wi, anchorEl) {
+  closeRepoPicker();
+
+  const popover = document.createElement('div');
+  popover.className = 'repo-config-popover repo-picker';
+
+  const title = document.createElement('div');
+  title.className = 'popover-title';
+  title.textContent = `Start agent on ${wi.type || 'work item'} #${wi.id}`;
+  popover.appendChild(title);
+
+  const hint = document.createElement('div');
+  hint.className = 'popover-hint';
+  hint.textContent = 'Pick a repo to clone. The agent will work on its default branch.';
+  popover.appendChild(hint);
+
+  const loading = document.createElement('div');
+  loading.className = 'popover-hint';
+  loading.textContent = 'Loading repos…';
+  popover.appendChild(loading);
+
+  positionRepoPicker(popover, anchorEl);
+  document.body.appendChild(popover);
+  openRepoPicker = popover;
+  setTimeout(() => document.addEventListener('click', onOutsideRepoPickerClick), 10);
+
+  // Load repos (cache per session)
+  let repos = repoCache[wi.project];
+  if (!repos) {
+    const result = await window.lgtm.getReposForProject(wi.project);
+    if (result && result.success) {
+      repos = result.repos;
+      repoCache[wi.project] = repos;
+    } else {
+      loading.textContent = `Failed to load repos: ${result?.error || ''}`;
+      return;
+    }
+  }
+
+  if (!repos || repos.length === 0) {
+    loading.textContent = 'No repos found in this project.';
+    return;
+  }
+
+  // Replace loading with select + go button
+  loading.remove();
+
+  const select = document.createElement('select');
+  select.className = 'repo-picker-select';
+  const sorted = [...repos].sort((a, b) => a.name.localeCompare(b.name));
+  sorted.forEach((r) => {
+    const opt = document.createElement('option');
+    opt.value = r.name;
+    opt.textContent = r.name;
+    select.appendChild(opt);
+  });
+  const defaultRepo = lastUsedRepos[wi.project];
+  if (defaultRepo && sorted.some((r) => r.name === defaultRepo)) {
+    select.value = defaultRepo;
+  }
+  popover.appendChild(select);
+
+  const btnRow = document.createElement('div');
+  btnRow.className = 'popover-btn-row';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'popover-reset-btn';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeRepoPicker();
+  });
+
+  const goBtn = document.createElement('button');
+  goBtn.className = 'popover-save-btn';
+  goBtn.textContent = 'Start';
+  goBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const repoName = select.value;
+    const repoInfo = { project: wi.project, repo: repoName };
+
+    // Tab-specific agent/model and per-repo prompt file.
+    const isBugs = activeTab === 'bugs';
+    const tabAgent  = isBugs ? bugsSelectedAgent : ticketsSelectedAgent;
+    const tabModels = isBugs ? bugsAgentModels   : ticketsAgentModels;
+    const tabRepoCfgs = isBugs ? bugsRepoConfigs : ticketsRepoConfigs;
+
+    const agentId = tabAgent || selectedAgent || 'claude';
+    const model = tabModels[agentId] || agentModels[agentId] || null;
+    const repoKey = `${wi.project}/${repoName}`;
+    const promptFile = tabRepoCfgs[repoKey] || '';
+
+    // Optimistic local state
+    lastUsedRepos[wi.project] = repoName;
+    const optimisticKey = `${wi.project}/${repoName}/wi-${wi.id}`;
+    reviewStatuses[optimisticKey] = {
+      status: 'cloning',
+      agentId,
+      output: '',
+      pr: wiAsPr(wi),
+    };
+    revealedRows.delete(`wi-${wi.project}-${wi.id}`);
+    closeRepoPicker();
+    rerenderActiveWorkItemList();
+
+    const result = await window.lgtm.startWorkItemAction({
+      workItem: wi,
+      repoInfo,
+      agentId,
+      model,
+      promptFile,
+    });
+    if (!result || !result.success) {
+      reviewStatuses[optimisticKey].status = 'failed';
+      reviewStatuses[optimisticKey].output = result?.error || 'Failed to start agent.';
+      rerenderActiveWorkItemList();
+      alert(result?.error || 'Failed to start agent.');
+    }
+  });
+
+  btnRow.appendChild(cancelBtn);
+  btnRow.appendChild(goBtn);
+  popover.appendChild(btnRow);
+
+  // Reposition after content change and focus the select
+  positionRepoPicker(popover, anchorEl);
+  setTimeout(() => select.focus(), 30);
+}
+
+function positionRepoPicker(popover, anchorEl) {
+  const rect = anchorEl.getBoundingClientRect();
+  popover.style.top = `${Math.min(rect.bottom + 4, window.innerHeight - 200)}px`;
+  popover.style.right = `${Math.max(8, window.innerWidth - rect.right)}px`;
+}
+
+function onOutsideRepoPickerClick(e) {
+  if (openRepoPicker && !openRepoPicker.contains(e.target)) {
+    closeRepoPicker();
+  }
+}
+
+function closeRepoPicker() {
+  if (openRepoPicker) {
+    openRepoPicker.remove();
+    openRepoPicker = null;
+    document.removeEventListener('click', onOutsideRepoPickerClick);
+  }
+}
+
+// ── Tickets (non-bug work items) ─────────────────────────────────
+function renderTicketList(items) {
+  currentTickets = items || [];
+  ticketListEl.innerHTML = '';
+
+  if (currentTickets.length > 0) {
+    ticketsTabCount.textContent = currentTickets.length;
+    ticketsTabCount.classList.remove('hidden');
+  } else {
+    ticketsTabCount.classList.add('hidden');
+  }
+
+  if (currentTickets.length === 0) {
+    ticketListEl.classList.add('hidden');
+    noTicketsEl.classList.remove('hidden');
+    return;
+  }
+  ticketListEl.classList.remove('hidden');
+  noTicketsEl.classList.add('hidden');
+
+  // Group by project, then sort items within each group by sprint recency
+  // (finishDate desc, backlog items last).
+  const groups = {};
+  currentTickets.forEach((item) => {
+    if (!groups[item.project]) groups[item.project] = [];
+    groups[item.project].push(item);
+  });
+
+  const sprintRank = (item) => {
+    if (item.isBacklog) return -Infinity;
+    const f = item.iterationFinish ? new Date(item.iterationFinish).getTime() : null;
+    const s = item.iterationStart ? new Date(item.iterationStart).getTime() : null;
+    return f ?? s ?? 0;
+  };
+
+  const projectNames = Object.keys(groups).sort((a, b) => a.localeCompare(b));
+
+  projectNames.forEach((project) => {
+    const items = groups[project].slice().sort((a, b) => {
+      if (a.isBacklog && !b.isBacklog) return 1;
+      if (!a.isBacklog && b.isBacklog) return -1;
+      return sprintRank(b) - sprintRank(a);
+    });
+
+    const isCollapsed = collapsedTicketProjects[project] || false;
+
+    const header = document.createElement('div');
+    header.className = 'repo-group-header';
+
+    const chevron = document.createElement('span');
+    chevron.className = `repo-chevron${isCollapsed ? ' collapsed' : ''}`;
+    chevron.textContent = '▾';
+
+    const name = document.createElement('span');
+    name.className = 'repo-group-name';
+    name.textContent = project;
+
+    const count = document.createElement('span');
+    count.className = 'repo-group-count';
+    count.textContent = items.length;
+
+    header.appendChild(chevron);
+    header.appendChild(name);
+    header.appendChild(count);
+
+    header.addEventListener('click', () => {
+      collapsedTicketProjects[project] = !collapsedTicketProjects[project];
+      renderTicketList(currentTickets);
+    });
+
+    ticketListEl.appendChild(header);
+
+    if (isCollapsed) return;
+
+    items.forEach((item) => {
+      renderWorkItemRow(ticketListEl, item, item.type || 'Item');
+    });
+  });
+}
+
+function typeClassFor(type) {
+  const t = (type || '').toLowerCase();
+  if (t === 'user story' || t === 'story') return 'story';
+  if (t === 'task') return 'task';
+  if (t === 'feature') return 'feature';
+  if (t === 'epic') return 'epic';
+  if (t === 'issue') return 'issue';
+  return 'other';
+}
+
+async function refreshTickets() {
+  ticketListEl.innerHTML = '<div class="loading">Loading tickets…</div>';
+  noTicketsEl.classList.add('hidden');
+  const result = await window.lgtm.refreshWorkItems();
+  if (result.success) {
+    renderTicketList(result.items);
+  } else {
+    ticketListEl.innerHTML = `<div class="loading">Failed to load tickets: ${esc(result.error || '')}</div>`;
   }
 }
 
@@ -1057,6 +1661,242 @@ settingsSave.addEventListener('click', async () => {
 
 settingsBack.addEventListener('click', () => showView(prListView));
 
+// ── Per-tab settings: Bugs / Tickets ─────────────────────────────
+bugsSettingsBtn.addEventListener('click', async () => {
+  await populateTabSettings('bugs');
+  showView(bugsSettingsView);
+});
+ticketsSettingsBtn.addEventListener('click', async () => {
+  await populateTabSettings('tickets');
+  showView(ticketsSettingsView);
+});
+
+bugsSettingsBack.addEventListener('click', () => showView(prListView));
+ticketsSettingsBack.addEventListener('click', () => showView(prListView));
+
+async function populateTabSettings(kind) {
+  agents = await window.lgtm.refreshAgents();
+  const settings = await window.lgtm.getSettings();
+
+  if (kind === 'bugs') {
+    bugsSelectedAgent = settings.bugsAgent || settings.defaultAgent || 'claude';
+    bugsAgentModels = settings.bugsAgentModels || {};
+    bugsRepoConfigs = settings.bugsRepoConfigs || {};
+    renderTabAgentConfig('bugs');
+    renderTabRepoPromptConfig('bugs');
+  } else {
+    ticketsSelectedAgent = settings.ticketsAgent || settings.defaultAgent || 'claude';
+    ticketsAgentModels = settings.ticketsAgentModels || {};
+    ticketsRepoConfigs = settings.ticketsRepoConfigs || {};
+    renderTabAgentConfig('tickets');
+    renderTabRepoPromptConfig('tickets');
+  }
+}
+
+function renderTabAgentConfig(kind) {
+  const listEl = kind === 'bugs' ? bugsAgentConfigList : ticketsAgentConfigList;
+  const selected = kind === 'bugs' ? bugsSelectedAgent : ticketsSelectedAgent;
+  const models = kind === 'bugs' ? bugsAgentModels : ticketsAgentModels;
+  const radioName = `tab-agent-${kind}`;
+
+  listEl.innerHTML = '';
+  agents.forEach((agent) => {
+    const row = document.createElement('div');
+    row.className = `agent-config-row${agent.available ? '' : ' disabled'}`;
+
+    const header = document.createElement('div');
+    header.className = 'agent-config-header';
+
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = radioName;
+    radio.value = agent.id;
+    radio.checked = agent.id === selected;
+    radio.disabled = !agent.available;
+    radio.id = `${radioName}-${agent.id}`;
+
+    const label = document.createElement('label');
+    label.htmlFor = radio.id;
+    label.className = 'agent-config-name';
+    label.textContent = agent.name;
+
+    const badge = document.createElement('span');
+    badge.className = `agent-status-badge ${agent.available ? 'installed' : 'missing'}`;
+    badge.textContent = agent.available ? 'installed' : 'not found';
+
+    header.appendChild(radio);
+    header.appendChild(label);
+    header.appendChild(badge);
+
+    const modelRow = document.createElement('div');
+    modelRow.className = 'agent-config-model';
+    const modelLabel = document.createElement('span');
+    modelLabel.className = 'agent-config-model-label';
+    modelLabel.textContent = 'Model:';
+    const modelSelect = document.createElement('select');
+    modelSelect.className = 'agent-model-select';
+    modelSelect.disabled = !agent.available;
+    modelSelect.dataset.agentId = agent.id;
+    agent.models.forEach((m) => {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.label;
+      if (models[agent.id] === m.id) opt.selected = true;
+      modelSelect.appendChild(opt);
+    });
+    modelRow.appendChild(modelLabel);
+    modelRow.appendChild(modelSelect);
+
+    row.appendChild(header);
+    row.appendChild(modelRow);
+    listEl.appendChild(row);
+  });
+}
+
+function renderTabRepoPromptConfig(kind) {
+  const listEl = kind === 'bugs' ? bugsRepoPromptList : ticketsRepoPromptList;
+  const cfgs = kind === 'bugs' ? bugsRepoConfigs : ticketsRepoConfigs;
+
+  listEl.innerHTML = '';
+  const repoKeys = Object.keys(cfgs).sort();
+  if (repoKeys.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'hint';
+    empty.textContent = 'No repos configured yet. Click "+ Add repo" to pick a repo and a prompt file.';
+    listEl.appendChild(empty);
+    return;
+  }
+
+  repoKeys.forEach((repoKey) => {
+    const row = document.createElement('div');
+    row.className = 'repo-config-row';
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'repo-config-name';
+    nameEl.textContent = repoKey;
+
+    const inputWrapper = createAutocompleteInput(repoKey, cfgs[repoKey] || '', 'Search for a file in the repo…');
+    const input = inputWrapper.querySelector('.repo-config-input');
+    input.addEventListener('input', () => {
+      cfgs[repoKey] = input.value.trim();
+    });
+
+    const btnRow = document.createElement('div');
+    btnRow.style.display = 'flex';
+    btnRow.style.gap = '6px';
+    btnRow.style.marginTop = '6px';
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'btn-secondary';
+    removeBtn.textContent = 'Remove';
+    removeBtn.addEventListener('click', () => {
+      delete cfgs[repoKey];
+      renderTabRepoPromptConfig(kind);
+    });
+    btnRow.appendChild(removeBtn);
+
+    row.appendChild(nameEl);
+    row.appendChild(inputWrapper);
+    row.appendChild(btnRow);
+    listEl.appendChild(row);
+  });
+}
+
+bugsAddRepoBtn.addEventListener('click',    () => promptAddRepoConfig('bugs'));
+ticketsAddRepoBtn.addEventListener('click', () => promptAddRepoConfig('tickets'));
+
+async function promptAddRepoConfig(kind) {
+  // Build a project/repo picker. Fetch all projects + their repos.
+  const projects = await fetchAllProjectsWithRepos();
+  if (!projects || projects.length === 0) {
+    alert('No projects / repos available.');
+    return;
+  }
+  const options = [];
+  projects.forEach((p) => {
+    (p.repos || []).forEach((r) => options.push(`${p.name}/${r.name}`));
+  });
+  if (options.length === 0) { alert('No repos found.'); return; }
+
+  // Simple prompt-based picker for now.
+  const input = prompt(`Pick a repo to configure (type exact match):\n\n${options.slice(0, 40).join('\n')}${options.length > 40 ? '\n…' : ''}`, options[0]);
+  if (!input) return;
+  if (!options.includes(input)) {
+    alert(`"${input}" is not in the list of repos.`);
+    return;
+  }
+  const cfgs = kind === 'bugs' ? bugsRepoConfigs : ticketsRepoConfigs;
+  if (!cfgs[input]) cfgs[input] = '';
+  renderTabRepoPromptConfig(kind);
+}
+
+// Cache projects + repos across a session (reuses repoCache from picker).
+async function fetchAllProjectsWithRepos() {
+  // Discover project names from known work items & PRs plus any cached repos.
+  const projectNames = new Set();
+  currentPrs.forEach((pr) => projectNames.add(pr.project));
+  currentBugs.forEach((b) => projectNames.add(b.project));
+  currentTickets.forEach((t) => projectNames.add(t.project));
+  Object.keys(repoCache).forEach((p) => projectNames.add(p));
+
+  const results = [];
+  for (const name of Array.from(projectNames).sort()) {
+    let repos = repoCache[name];
+    if (!repos) {
+      const r = await window.lgtm.getReposForProject(name);
+      if (r && r.success) {
+        repos = r.repos;
+        repoCache[name] = repos;
+      } else {
+        repos = [];
+      }
+    }
+    results.push({ name, repos });
+  }
+  return results;
+}
+
+bugsSettingsSave.addEventListener('click', async () => {
+  await saveTabSettings('bugs');
+  showView(prListView);
+});
+ticketsSettingsSave.addEventListener('click', async () => {
+  await saveTabSettings('tickets');
+  showView(prListView);
+});
+
+async function saveTabSettings(kind) {
+  const listEl = kind === 'bugs' ? bugsAgentConfigList : ticketsAgentConfigList;
+  const radioName = `tab-agent-${kind}`;
+
+  const newModels = {};
+  listEl.querySelectorAll('.agent-model-select').forEach((sel) => {
+    newModels[sel.dataset.agentId] = sel.value;
+  });
+  const radio = listEl.querySelector(`input[name="${radioName}"]:checked`);
+  const agent = radio ? radio.value : 'claude';
+
+  if (kind === 'bugs') {
+    bugsSelectedAgent = agent;
+    bugsAgentModels = newModels;
+    await window.lgtm.saveSettings({
+      bugsAgent: agent,
+      bugsAgentModels: newModels,
+      bugsRepoConfigs,
+    });
+    renderTabAgentSelects();
+  } else {
+    ticketsSelectedAgent = agent;
+    ticketsAgentModels = newModels;
+    await window.lgtm.saveSettings({
+      ticketsAgent: agent,
+      ticketsAgentModels: newModels,
+      ticketsRepoConfigs,
+    });
+    renderTabAgentSelects();
+  }
+}
+
 disconnectBtn.addEventListener('click', async () => {
   if (confirm('Disconnect and remove your PAT from secure storage?')) {
     await window.lgtm.clearPat();
@@ -1065,6 +1905,11 @@ disconnectBtn.addEventListener('click', async () => {
     currentBugs = [];
     bugsLoaded = false;
     bugsTabCount.classList.add('hidden');
+    currentTickets = [];
+    ticketsLoaded = false;
+    ticketsTabCount.classList.add('hidden');
+    collapsedBugProjects = {};
+    collapsedTicketProjects = {};
     setActiveTab('prs');
     showView(patSetup);
     subtitleEl.textContent = '';
@@ -1075,9 +1920,19 @@ disconnectBtn.addEventListener('click', async () => {
 window.lgtm.onPrList((prs) => renderPrList(prs));
 window.lgtm.onPrError((msg) => console.error('[LGTM] PR fetch error:', msg));
 
+window.lgtm.onCurrentUser((u) => {
+  currentUser = u;
+  if (currentPrs.length) renderPrList(currentPrs);
+});
+
 window.lgtm.onPatStatus(async (status) => {
   if (status.hasPat) {
     await loadAgents();
+    // Pull current user — main may have already cached it.
+    try {
+      const u = await window.lgtm.getMe();
+      if (u) currentUser = u;
+    } catch { /* ignore */ }
     showView(prListView);
     subtitleEl.textContent = (status.orgUrl || '').replace('https://dev.azure.com/', '');
     // Background-prefetch bugs so the tab badge populates without a click.
@@ -1085,6 +1940,12 @@ window.lgtm.onPatStatus(async (status) => {
       bugsLoaded = true;
       window.lgtm.refreshBugs().then((result) => {
         if (result && result.success) renderBugList(result.bugs);
+      }).catch(() => {});
+    }
+    if (!ticketsLoaded) {
+      ticketsLoaded = true;
+      window.lgtm.refreshWorkItems().then((result) => {
+        if (result && result.success) renderTicketList(result.items);
       }).catch(() => {});
     }
   } else {
@@ -1096,7 +1957,8 @@ window.lgtm.onReviewUpdate((data) => {
   if (!reviewStatuses[data.key]) reviewStatuses[data.key] = { output: '' };
   reviewStatuses[data.key].status = data.status;
   reviewStatuses[data.key].agentId = data.agentId;
-  renderPrList(currentPrs);
+  if (data.pr) reviewStatuses[data.key].pr = data.pr;
+  rerenderForKey(data.key);
 
   // Update detail panel if it's showing this review
   if (activeDetailKey === data.key) {
@@ -1108,6 +1970,9 @@ window.lgtm.onReviewUpdate((data) => {
 window.lgtm.onReviewOutput((data) => {
   if (!reviewStatuses[data.key]) reviewStatuses[data.key] = { output: '', status: 'running' };
   reviewStatuses[data.key].output += data.chunk;
+
+  // Update the inline running line on whatever list contains this row.
+  updateRunningLineEls(data.key);
 
   // Update detail panel if it's showing this review
   if (activeDetailKey === data.key) {
@@ -1181,4 +2046,33 @@ function escHtml(str) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+function stripAnsi(s) {
+  // Drop ANSI color/control sequences agents emit on stdout.
+  return (s || '').replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+}
+
+function lastMeaningfulLine(output) {
+  const stripped = stripAnsi(output || '');
+  const lines = stripped.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const t = lines[i].trim();
+    if (t) return t.length > 200 ? t.slice(0, 200) + '…' : t;
+  }
+  return '';
+}
+
+function statusLineFor(key) {
+  const review = reviewStatuses[key];
+  if (!review) return '';
+  if (review.status === 'cloning') return 'Cloning repo…';
+  return lastMeaningfulLine(review.output) || 'Running…';
+}
+
+function updateRunningLineEls(key) {
+  const text = statusLineFor(key);
+  document.querySelectorAll('[data-running-key]').forEach((el) => {
+    if (el.dataset.runningKey === key) el.textContent = text;
+  });
 }

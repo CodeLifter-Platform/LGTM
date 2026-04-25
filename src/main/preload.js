@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld('lgtm', {
   // PAT
   validatePat: (pat, orgUrl) => ipcRenderer.invoke('validate-pat', { pat, orgUrl }),
   clearPat: () => ipcRenderer.invoke('clear-pat'),
+  getMe: () => ipcRenderer.invoke('get-me'),
+  onCurrentUser: (cb) => ipcRenderer.on('current-user', (_e, u) => cb(u)),
 
   // PRs
   refreshPrs: () => ipcRenderer.invoke('refresh-prs'),
@@ -11,10 +13,17 @@ contextBridge.exposeInMainWorld('lgtm', {
   // Bugs
   refreshBugs: () => ipcRenderer.invoke('refresh-bugs'),
 
+  // Work items (non-bug tickets)
+  refreshWorkItems: () => ipcRenderer.invoke('refresh-workitems'),
+
+
   // External
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
 
-  reviewPr: ({ pr, agentId, model }) => ipcRenderer.invoke('review-pr', { pr, agentId, model }),
+  reviewPr: ({ pr, agentId, model, mode }) => ipcRenderer.invoke('review-pr', { pr, agentId, model, mode }),
+  startWorkItemAction: ({ workItem, repoInfo, agentId, model, promptFile }) =>
+    ipcRenderer.invoke('start-workitem-action', { workItem, repoInfo, agentId, model, promptFile }),
+  getReposForProject: (project) => ipcRenderer.invoke('get-repos-for-project', project),
   cancelReview: (key) => ipcRenderer.invoke('cancel-review', key),
   getReviews: () => ipcRenderer.invoke('get-reviews'),
   getReviewOutput: (key) => ipcRenderer.invoke('get-review-output', key),

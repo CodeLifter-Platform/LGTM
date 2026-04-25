@@ -15,6 +15,19 @@
   --radius:    8px;
 }
 
+/* Light theme overrides — toggled by html.light */
+html.light {
+  --bg:        #f4f5f9;
+  --surface:   #ffffff;
+  --border:    #d6dbe8;
+  --text:      #1a1a2e;
+  --text-dim:  #6c7a89;
+  --accent:    #2a7cd6;
+  --green:     #1f9d55;
+  --yellow:    #c27803;
+  --red:       #c92a3a;
+}
+
 /* ── Update banner ───────────────────────────────────────────── */
 .update-banner {
   display: flex;
@@ -87,6 +100,25 @@ html, body {
 #titlebar .subtitle {
   font-size: 11px;
   color: var(--text-dim);
+}
+
+.btn-theme-toggle {
+  -webkit-app-region: no-drag;
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.btn-theme-toggle:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(76, 201, 240, 0.08);
 }
 
 /* ── Views ─────────────────────────────────────────────────────── */
@@ -289,25 +321,39 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .bugs-hint strong { color: var(--text); font-weight: 600; }
 
-/* ── Bug item severity badges ──────────────────────────────────── */
-.bug-sev {
+/* ── Bug item priority badges ──────────────────────────────────── */
+.bug-pri {
   font-size: 10px;
   font-weight: 700;
-  padding: 2px 6px;
+  padding: 2px 7px;
   border-radius: 4px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  min-width: 28px;
+  text-align: center;
 }
-.bug-sev.critical {
+.bug-pri.p1 {
   background: rgba(231, 76, 60, 0.18);
   color: var(--red);
-  border: 1px solid rgba(231, 76, 60, 0.4);
+  border: 1px solid rgba(231, 76, 60, 0.5);
+  box-shadow: 0 0 6px rgba(231, 76, 60, 0.25);
 }
-.bug-sev.high {
+.bug-pri.p2 {
   background: rgba(243, 156, 18, 0.18);
   color: var(--yellow);
   border: 1px solid rgba(243, 156, 18, 0.4);
+}
+.bug-pri.p3 {
+  background: rgba(76, 201, 240, 0.15);
+  color: var(--accent);
+  border: 1px solid rgba(76, 201, 240, 0.35);
+}
+.bug-pri.p4, .bug-pri.pnone {
+  background: rgba(136, 146, 164, 0.15);
+  color: var(--text-dim);
+  border: 1px solid rgba(136, 146, 164, 0.3);
 }
 
 /* ── Toolbar ───────────────────────────────────────────────────── */
@@ -316,6 +362,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   align-items: center;
   gap: 4px;
   margin-bottom: 8px;
+}
+
+.tab-toolbar {
+  margin-bottom: 6px;
 }
 
 /* ── Agent select (toolbar dropdown) ───────────────────────────── */
@@ -397,6 +447,26 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.pr-running-line {
+  font-size: 11px;
+  color: var(--accent);
+  font-style: italic;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 3px;
+  padding-left: 14px;
+  position: relative;
+  font-variant-numeric: tabular-nums;
+}
+.pr-running-line::before {
+  content: "›";
+  position: absolute;
+  left: 2px;
+  color: var(--text-dim);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
 .pr-title {
   font-size: 11px;
   color: var(--text-dim);
@@ -436,6 +506,96 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   background: rgba(231, 76, 60, 0.15);
   border-color: var(--red);
 }
+
+/* ── PR mode chip (review / resolve) ───────────────────────────── */
+.pr-mode-chip {
+  -webkit-app-region: no-drag;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: filter 0.15s, background 0.15s, border-color 0.15s;
+  background: transparent;
+}
+.pr-mode-chip.review {
+  border: 1px solid rgba(76, 201, 240, 0.4);
+  color: var(--accent);
+  background: rgba(76, 201, 240, 0.08);
+}
+.pr-mode-chip.review:hover {
+  background: rgba(76, 201, 240, 0.15);
+}
+.pr-mode-chip.resolve {
+  border: 1px solid rgba(46, 204, 113, 0.45);
+  color: var(--green);
+  background: rgba(46, 204, 113, 0.08);
+}
+.pr-mode-chip.resolve:hover {
+  background: rgba(46, 204, 113, 0.18);
+}
+
+/* ── Row reveal: Play + Dismiss ────────────────────────────────── */
+.btn-play-row {
+  -webkit-app-region: no-drag;
+  background: transparent;
+  border: 1px solid rgba(46, 204, 113, 0.35);
+  color: var(--green);
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, border-color 0.15s;
+}
+.btn-play-row:hover {
+  background: rgba(46, 204, 113, 0.15);
+  border-color: var(--green);
+}
+
+.btn-dismiss-row {
+  -webkit-app-region: no-drag;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.btn-dismiss-row:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+  background: rgba(136, 146, 164, 0.1);
+}
+
+.clickable-link {
+  cursor: pointer;
+}
+.clickable-link:hover {
+  text-decoration: underline;
+}
+
+/* ── Repo picker popover ───────────────────────────────────────── */
+.repo-picker-select {
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+}
+.repo-picker-select:focus { border-color: var(--accent); }
 
 /* ── Empty state ───────────────────────────────────────────────── */
 .empty-state {
@@ -731,6 +891,39 @@ hr {
   border-color: rgba(243, 156, 18, 0.5);
   background: rgba(243, 156, 18, 0.07);
 }
+.repo-group-header.backlog {
+  border-color: rgba(136, 146, 164, 0.25);
+  background: rgba(136, 146, 164, 0.04);
+}
+.repo-group-header.backlog .repo-group-name {
+  color: var(--text-dim);
+}
+
+.sprint-dates {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ── Work item type chips ──────────────────────────────────────── */
+.wi-type {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  border: 1px solid transparent;
+}
+.wi-type.story   { background: rgba(46, 204, 113, 0.15);  color: var(--green);     border-color: rgba(46, 204, 113, 0.3); }
+.wi-type.task    { background: rgba(243, 156, 18, 0.15);  color: var(--yellow);    border-color: rgba(243, 156, 18, 0.3); }
+.wi-type.feature { background: rgba(155, 89, 182, 0.18);  color: #c792ea;          border-color: rgba(155, 89, 182, 0.35); }
+.wi-type.epic    { background: rgba(155, 89, 182, 0.25);  color: #e1a8ff;          border-color: rgba(155, 89, 182, 0.5); }
+.wi-type.issue   { background: rgba(76, 201, 240, 0.15);  color: var(--accent);    border-color: rgba(76, 201, 240, 0.3); }
+.wi-type.other   { background: rgba(136, 146, 164, 0.15); color: var(--text-dim);  border-color: rgba(136, 146, 164, 0.3); }
 
 .repo-chevron {
   font-size: 11px;

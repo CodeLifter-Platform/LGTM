@@ -96,6 +96,26 @@ class DevOpsClient {
     }
   }
 
+  // ── Authenticated user ───────────────────────────────────────────
+
+  /**
+   * Fetch the authenticated user's identity. Works for both
+   * Azure DevOps Services and Server via /_apis/connectionData.
+   */
+  async getMe() {
+    // _apis/connectionData predates api-version; passing it 400s on
+    // visualstudio.com. Use connectOptions to scope the response instead.
+    const res = await this.api.get('/_apis/connectionData', {
+      params: { connectOptions: 'none' },
+    });
+    const u = res.data.authenticatedUser || {};
+    return {
+      id: u.id || '',
+      displayName: u.providerDisplayName || u.customDisplayName || '',
+      email: (u.properties && u.properties.Account && u.properties.Account['$value']) || '',
+    };
+  }
+
   // ── Projects ─────────────────────────────────────────────────────
   async getProjects() {
     const res = await this.api.get('/_apis/projects', {
@@ -172,14 +192,14 @@ class DevOpsClient {
     return res.data.value || [];
   }
 
-  // ── Work Items: Critical/High Bugs ───────────────────────────────
+  // ── Work Items: My Open Bugs ─────────────────────────────────────
 
   /**
-   * Fetch all open bugs across every project where Severity is
-   * "1 - Critical" or "2 - High" and the bug is not in a terminal state.
-   * Returns a flat array of normalised bug objects.
+   * Fetch all open bugs assigned to the authenticated user across every
+   * project. The `@Me` WIQL macro resolves to whoever owns the PAT.
+   * Returns a flat array of normalised bug objects sorted by priority.
    */
-  async getCriticalBugs() {
+  async getMyOpenBugs() {
     let projects = await this.getProjects();
 
     if (this.projectFilter) {
@@ -193,9 +213,9 @@ class DevOpsClient {
         SELECT [System.Id]
         FROM WorkItems
         WHERE [System.WorkItemType] = 'Bug'
-          AND [Microsoft.VSTS.Common.Severity] IN ('1 - Critical', '2 - High')
+          AND [System.AssignedTo] = @Me
           AND [System.State] NOT IN ('Closed', 'Resolved', 'Done', 'Removed')
-        ORDER BY [Microsoft.VSTS.Common.Severity] ASC, [System.CreatedDate] DESC
+        ORDER BY [Microsoft.VSTS.Common.Priority] ASC, [System.CreatedDate] DESC
       `.trim(),
     };
 
@@ -254,16 +274,187 @@ class DevOpsClient {
       }
     }
 
-    // Sort: Critical first, then High; within each, newest first.
-    const sevRank = (s) => (s && s.startsWith('1') ? 0 : s && s.startsWith('2') ? 1 : 2);
+    // Sort: highest priority first (1 → 4), unset last; within each, newest first.
     allBugs.sort((a, b) => {
-      const sa = sevRank(a.severity);
-      const sb = sevRank(b.severity);
-      if (sa !== sb) return sa - sb;
+      const pa = typeof a.priority === 'number' ? a.priority : 99;
+      const pb = typeof b.priority === 'number' ? b.priority : 99;
+      if (pa !== pb) return pa - pb;
       return new Date(b.createdDate) - new Date(a.createdDate);
     });
 
     return allBugs;
+  }
+
+  // ── Work Items: My Open Non-Bug Tickets ──────────────────────────
+
+  /**
+   * Fetch iteration classification nodes for a project and return a map of
+   * IterationPath → { startDate, finishDate }. Used to sort groups by sprint
+   * recency. Paths use the same backslash-separated format as
+   * System.IterationPath on work items.
+   */
+  async getIterationMetadata(project) {
+    try {
+      const res = await this.api.get(
+        `/${encodeURIComponent(project)}/_apis/wit/classificationnodes/Iterations`,
+        { params: { '$depth': 10, 'api-version': API_VERSION } },
+      );
+      const map = {};
+      const walk = (node, pathParts) => {
+        const currentPath = pathParts.join('\\');
+        map[currentPath] = {
+          startDate: node.attributes?.startDate || null,
+          finishDate: node.attributes?.finishDate || null,
+        };
+        (node.children || []).forEach((child) => {
+          walk(child, [...pathParts, child.name]);
+        });
+      };
+      walk(res.data, [res.data.name || project]);
+      return map;
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * Fetch all open non-Bug work items assigned to the authenticated user
+   * across every project. Returns a flat array of normalised objects with
+   * iteration metadata so the UI can group by sprint.
+   */
+  async getMyOpenWorkItems() {
+    let projects = await this.getProjects();
+
+    if (this.projectFilter) {
+      projects = projects.filter(
+        (p) => p.name.toLowerCase() === this.projectFilter.toLowerCase(),
+      );
+    }
+
+    const wiql = {
+      query: `
+        SELECT [System.Id]
+        FROM WorkItems
+        WHERE [System.WorkItemType] <> 'Bug'
+          AND [System.AssignedTo] = @Me
+          AND [System.State] NOT IN ('Closed', 'Resolved', 'Done', 'Removed', 'Completed')
+        ORDER BY [Microsoft.VSTS.Common.Priority] ASC, [System.ChangedDate] DESC
+      `.trim(),
+    };
+
+    const allItems = [];
+
+    for (const project of projects) {
+      try {
+        const wiqlRes = await this.api.post(
+          `/${encodeURIComponent(project.name)}/_apis/wit/wiql`,
+          wiql,
+          { params: { 'api-version': API_VERSION } },
+        );
+        const ids = (wiqlRes.data.workItems || []).map((w) => w.id);
+        if (ids.length === 0) continue;
+
+        const iterMap = await this.getIterationMetadata(project.name);
+
+        const fields = [
+          'System.Id',
+          'System.Title',
+          'System.State',
+          'System.WorkItemType',
+          'System.TeamProject',
+          'System.IterationPath',
+          'System.AssignedTo',
+          'System.CreatedDate',
+          'System.ChangedDate',
+          'Microsoft.VSTS.Common.Priority',
+        ];
+
+        for (let i = 0; i < ids.length; i += 200) {
+          const chunk = ids.slice(i, i + 200);
+          const detailRes = await this.api.get('/_apis/wit/workitems', {
+            params: {
+              ids: chunk.join(','),
+              fields: fields.join(','),
+              'api-version': API_VERSION,
+            },
+          });
+          for (const wi of detailRes.data.value || []) {
+            const f = wi.fields || {};
+            const iterPath = f['System.IterationPath'] || project.name;
+            const iterMeta = iterMap[iterPath] || {};
+            // Backlog = iteration path has no sprint nested under the project root.
+            const isBacklog = iterPath === project.name || !iterPath.includes('\\');
+            const iterName = isBacklog ? 'Backlog' : iterPath.split('\\').slice(1).join(' / ');
+
+            allItems.push({
+              id: wi.id,
+              title: f['System.Title'] || '',
+              state: f['System.State'] || '',
+              type: f['System.WorkItemType'] || '',
+              priority: typeof f['Microsoft.VSTS.Common.Priority'] === 'number'
+                ? f['Microsoft.VSTS.Common.Priority']
+                : null,
+              project: f['System.TeamProject'] || project.name,
+              iterationPath: iterPath,
+              iterationName: iterName,
+              isBacklog,
+              iterationStart: iterMeta.startDate || null,
+              iterationFinish: iterMeta.finishDate || null,
+              createdDate: f['System.CreatedDate'] || '',
+              changedDate: f['System.ChangedDate'] || '',
+              webUrl: `${this.orgUrl}/${encodeURIComponent(f['System.TeamProject'] || project.name)}/_workitems/edit/${wi.id}`,
+            });
+          }
+        }
+      } catch {
+        // skip projects we can't read
+      }
+    }
+
+    return allItems;
+  }
+
+  /**
+   * Fetch a single work item with description / repro steps / acceptance
+   * criteria fields — used when kicking off an agent action on a bug/ticket
+   * so the agent has full context.
+   */
+  async getWorkItemDetails(id) {
+    const fields = [
+      'System.Id',
+      'System.Title',
+      'System.State',
+      'System.WorkItemType',
+      'System.TeamProject',
+      'System.Description',
+      'Microsoft.VSTS.TCM.ReproSteps',
+      'Microsoft.VSTS.TCM.SystemInfo',
+      'Microsoft.VSTS.Common.AcceptanceCriteria',
+      'Microsoft.VSTS.Common.Priority',
+      'Microsoft.VSTS.Common.Severity',
+      'System.Tags',
+    ];
+    const res = await this.api.get(`/_apis/wit/workitems/${id}`, {
+      params: {
+        fields: fields.join(','),
+        'api-version': API_VERSION,
+      },
+    });
+    const f = res.data.fields || {};
+    return {
+      id: res.data.id,
+      title: f['System.Title'] || '',
+      state: f['System.State'] || '',
+      type: f['System.WorkItemType'] || '',
+      project: f['System.TeamProject'] || '',
+      description: f['System.Description'] || '',
+      reproSteps: f['Microsoft.VSTS.TCM.ReproSteps'] || '',
+      systemInfo: f['Microsoft.VSTS.TCM.SystemInfo'] || '',
+      acceptanceCriteria: f['Microsoft.VSTS.Common.AcceptanceCriteria'] || '',
+      priority: typeof f['Microsoft.VSTS.Common.Priority'] === 'number' ? f['Microsoft.VSTS.Common.Priority'] : null,
+      severity: f['Microsoft.VSTS.Common.Severity'] || '',
+      tags: f['System.Tags'] || '',
+    };
   }
 
   // ── Repo file tree (for autocomplete) ────────────────────────────

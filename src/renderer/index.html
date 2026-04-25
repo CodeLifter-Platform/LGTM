@@ -5,6 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LGTM</title>
   <link rel="stylesheet" href="styles.css">
+  <script>
+    // Apply persisted theme before body renders to avoid a flash.
+    try {
+      if (localStorage.getItem('lgtm-theme') === 'light') {
+        document.documentElement.classList.add('light');
+      }
+    } catch (e) { /* ignore */ }
+  </script>
 </head>
 <body>
   <!-- ─── Draggable title bar ─────────────────────────────── -->
@@ -23,6 +31,7 @@
     </svg>
     <span class="logo">LGTM</span>
     <span class="subtitle" id="subtitle"></span>
+    <button id="theme-toggle" class="btn-theme-toggle" title="Toggle light/dark">&#9790;</button>
   </header>
 
   <!-- ─── Update banner ───────────────────────────────────── -->
@@ -63,9 +72,12 @@
     </div>
 
     <div class="tab-strip" role="tablist">
-      <button id="tab-prs" class="tab active" role="tab" aria-selected="true">Pull Requests</button>
+      <button id="tab-prs" class="tab active" role="tab" aria-selected="true">PRs</button>
       <button id="tab-bugs" class="tab" role="tab" aria-selected="false">
         Bugs <span id="bugs-tab-count" class="tab-count hidden">0</span>
+      </button>
+      <button id="tab-tickets" class="tab" role="tab" aria-selected="false">
+        Tickets <span id="tickets-tab-count" class="tab-count hidden">0</span>
       </button>
     </div>
 
@@ -82,14 +94,35 @@
 
     <!-- Tab pane: Bugs -->
     <div id="tab-pane-bugs" class="tab-pane hidden">
-      <div class="bugs-hint">Showing bugs with severity <strong>Critical</strong> or <strong>High</strong></div>
+      <div class="toolbar tab-toolbar">
+        <select id="bugs-agent-select" class="agent-select" title="Bug agent"></select>
+        <button id="bugs-settings-btn" class="btn-icon" title="Bugs settings">⚙</button>
+      </div>
+      <div class="bugs-hint">Open bugs <strong>assigned to you</strong>, grouped by project · sorted by priority within each</div>
 
       <div id="bug-list" class="pr-list">
         <div class="loading">Loading bugs…</div>
       </div>
 
       <div id="no-bugs" class="empty-state hidden">
-        <p>No open critical or high bugs.</p>
+        <p>No open bugs assigned to you.</p>
+      </div>
+    </div>
+
+    <!-- Tab pane: Tickets (non-bug work items) -->
+    <div id="tab-pane-tickets" class="tab-pane hidden">
+      <div class="toolbar tab-toolbar">
+        <select id="tickets-agent-select" class="agent-select" title="Ticket agent"></select>
+        <button id="tickets-settings-btn" class="btn-icon" title="Tickets settings">⚙</button>
+      </div>
+      <div class="bugs-hint">Open tickets <strong>assigned to you</strong>, grouped by project · sorted by sprint recency</div>
+
+      <div id="ticket-list" class="pr-list">
+        <div class="loading">Loading tickets…</div>
+      </div>
+
+      <div id="no-tickets" class="empty-state hidden">
+        <p>No open tickets assigned to you.</p>
       </div>
     </div>
   </section>
@@ -152,6 +185,60 @@
 
         <hr>
         <button id="disconnect-btn" class="btn-danger">Disconnect &amp; Clear PAT</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── Bugs settings panel ─────────────────────────────── -->
+  <section id="bugs-settings-view" class="view hidden">
+    <div class="settings-scroll">
+      <div class="card">
+        <h2>Bugs — Agent</h2>
+        <p class="hint">Agent used when you run work against a bug.</p>
+        <div id="bugs-agent-config-list" class="agent-config-list"></div>
+      </div>
+
+      <div class="card">
+        <h2>Bugs — Repo Prompt Files</h2>
+        <p class="hint">Pick a prompt file from each repo. When you start an agent on a bug and choose that repo, this file is appended to the work-item prompt.</p>
+        <div id="bugs-repo-prompt-list" class="repo-config-list"></div>
+        <div class="btn-row" style="margin-top: 10px;">
+          <button id="bugs-add-repo-btn" class="btn-secondary">+ Add repo</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="btn-row">
+          <button id="bugs-settings-save" class="btn-primary">Save</button>
+          <button id="bugs-settings-back" class="btn-secondary">Back</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── Tickets settings panel ──────────────────────────── -->
+  <section id="tickets-settings-view" class="view hidden">
+    <div class="settings-scroll">
+      <div class="card">
+        <h2>Tickets — Agent</h2>
+        <p class="hint">Agent used when you run work against a ticket (non-bug work item).</p>
+        <div id="tickets-agent-config-list" class="agent-config-list"></div>
+      </div>
+
+      <div class="card">
+        <h2>Tickets — Repo Prompt Files</h2>
+        <p class="hint">Pick a prompt file from each repo. When you start an agent on a ticket and choose that repo, this file is appended to the work-item prompt.</p>
+        <div id="tickets-repo-prompt-list" class="repo-config-list"></div>
+        <div class="btn-row" style="margin-top: 10px;">
+          <button id="tickets-add-repo-btn" class="btn-secondary">+ Add repo</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="btn-row">
+          <button id="tickets-settings-save" class="btn-primary">Save</button>
+          <button id="tickets-settings-back" class="btn-secondary">Back</button>
+        </div>
       </div>
     </div>
   </section>

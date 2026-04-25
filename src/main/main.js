@@ -18,6 +18,7 @@ let agentRunner = null;
 let agentRegistry = null;
 let webhookServer = null;
 let currentPat = null;
+let currentUser = null;
 
 const config = new ElectronStore({
   defaults: {
@@ -30,6 +31,13 @@ const config = new ElectronStore({
     repoConfigs: {},          // { "project/repo": { mode, repoFile, customPath } }
     starredRepos: [],         // ["project/repo", ...] — starred repos are reviewed first
     maxPrAgeDays: 7,          // only auto-review PRs created within this many days
+    lastUsedRepos: {},        // { [project]: "repoName" } — default for work item repo picker
+    bugsAgent: '',            // agent ID for bug runs (empty = fall back to defaultAgent)
+    bugsAgentModels: {},      // { [agentId]: modelId } for bug runs
+    bugsRepoConfigs: {},      // { "project/repo": "relative/path/to/prompt.md" }
+    ticketsAgent: '',         // agent ID for ticket runs
+    ticketsAgentModels: {},
+    ticketsRepoConfigs: {},
   },
 });
 
@@ -196,6 +204,16 @@ function showSettings() {
 async function initDevOps(pat, orgUrl) {
   devopsClient = new DevOpsClient(pat, orgUrl);
 
+  // Identify the authenticated user so the UI can flag "my PRs".
+  try {
+    currentUser = await devopsClient.getMe();
+    console.log(`[LGTM] Authenticated as: ${currentUser.displayName || currentUser.email || currentUser.id}`);
+    if (mainWindow) mainWindow.webContents.send('current-user', currentUser);
+  } catch (err) {
+    console.warn('[LGTM] Could not resolve current user:', err.message);
+    currentUser = null;
+  }
+
   pollPrs();
   setInterval(pollPrs, config.get('pollingIntervalMs'));
 
@@ -255,10 +273,13 @@ ipcMain.handle('clear-pat', async () => {
   await patStore.delete();
   config.set('orgUrl', '');
   currentPat = null;
+  currentUser = null;
   devopsClient = null;
   if (webhookServer) webhookServer.stop();
   return { success: true };
 });
+
+ipcMain.handle('get-me', () => currentUser);
 
 // ── IPC: PRs ─────────────────────────────────────────────────────────
 
@@ -277,8 +298,18 @@ ipcMain.handle('refresh-prs', async () => {
 ipcMain.handle('refresh-bugs', async () => {
   if (!devopsClient) return { success: false, error: 'Not authenticated' };
   try {
-    const bugs = await devopsClient.getCriticalBugs();
+    const bugs = await devopsClient.getMyOpenBugs();
     return { success: true, bugs };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('refresh-workitems', async () => {
+  if (!devopsClient) return { success: false, error: 'Not authenticated' };
+  try {
+    const items = await devopsClient.getMyOpenWorkItems();
+    return { success: true, items };
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -286,10 +317,33 @@ ipcMain.handle('refresh-bugs', async () => {
 
 // ── IPC: Reviews ─────────────────────────────────────────────────────
 
-ipcMain.handle('review-pr', async (_event, { pr, agentId, model }) => {
+ipcMain.handle('review-pr', async (_event, { pr, agentId, model, mode }) => {
   const agent = agentId || config.get('defaultAgent') || 'claude';
   const mdl = model || config.get('agentModels')[agent] || null;
-  return agentRunner.startReview(pr, agent, mdl);
+  return agentRunner.startReview(pr, agent, mdl, mode || 'review');
+});
+
+ipcMain.handle('start-workitem-action', async (_event, { workItem, repoInfo, agentId, model, promptFile }) => {
+  const agent = agentId || config.get('defaultAgent') || 'claude';
+  const mdl = model || config.get('agentModels')[agent] || null;
+  // Persist last-used repo per project so the picker can default to it.
+  const lastUsed = { ...(config.get('lastUsedRepos') || {}) };
+  lastUsed[repoInfo.project] = repoInfo.repo;
+  config.set('lastUsedRepos', lastUsed);
+  return agentRunner.startWorkItemAction(workItem, repoInfo, agent, mdl, { promptFile });
+});
+
+ipcMain.handle('get-repos-for-project', async (_event, project) => {
+  if (!devopsClient) return { success: false, error: 'Not authenticated', repos: [] };
+  try {
+    const repos = await devopsClient.getRepos(project);
+    return {
+      success: true,
+      repos: (repos || []).map((r) => ({ id: r.id, name: r.name })),
+    };
+  } catch (err) {
+    return { success: false, error: err.message, repos: [] };
+  }
 });
 
 ipcMain.handle('get-reviews', () => {
@@ -329,6 +383,13 @@ ipcMain.handle('get-settings', () => ({
   repoConfigs: config.get('repoConfigs'),
   starredRepos: config.get('starredRepos'),
   maxPrAgeDays: config.get('maxPrAgeDays'),
+  lastUsedRepos: config.get('lastUsedRepos'),
+  bugsAgent: config.get('bugsAgent'),
+  bugsAgentModels: config.get('bugsAgentModels'),
+  bugsRepoConfigs: config.get('bugsRepoConfigs'),
+  ticketsAgent: config.get('ticketsAgent'),
+  ticketsAgentModels: config.get('ticketsAgentModels'),
+  ticketsRepoConfigs: config.get('ticketsRepoConfigs'),
 }));
 
 ipcMain.handle('save-settings', async (_event, settings) => {
@@ -340,6 +401,13 @@ ipcMain.handle('save-settings', async (_event, settings) => {
   if (settings.repoConfigs !== undefined) config.set('repoConfigs', settings.repoConfigs);
   if (settings.starredRepos !== undefined) config.set('starredRepos', settings.starredRepos);
   if (settings.maxPrAgeDays !== undefined) config.set('maxPrAgeDays', settings.maxPrAgeDays);
+  if (settings.lastUsedRepos !== undefined) config.set('lastUsedRepos', settings.lastUsedRepos);
+  if (settings.bugsAgent !== undefined) config.set('bugsAgent', settings.bugsAgent);
+  if (settings.bugsAgentModels !== undefined) config.set('bugsAgentModels', settings.bugsAgentModels);
+  if (settings.bugsRepoConfigs !== undefined) config.set('bugsRepoConfigs', settings.bugsRepoConfigs);
+  if (settings.ticketsAgent !== undefined) config.set('ticketsAgent', settings.ticketsAgent);
+  if (settings.ticketsAgentModels !== undefined) config.set('ticketsAgentModels', settings.ticketsAgentModels);
+  if (settings.ticketsRepoConfigs !== undefined) config.set('ticketsRepoConfigs', settings.ticketsRepoConfigs);
   return { success: true };
 });
 

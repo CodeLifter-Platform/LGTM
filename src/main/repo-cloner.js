@@ -82,6 +82,38 @@ class RepoCloner {
   }
 
   /**
+   * Clone a repo's default branch into a temp dir. Used when an agent is
+   * kicked off against a work item (bug/ticket) rather than a PR.
+   */
+  async cloneRepo(project, repo, workItemId) {
+    const cloneUrl = this._buildCloneUrlFromParts(project, repo);
+    const clonePath = path.join(
+      os.tmpdir(),
+      `lgtm-wi-${project}-${repo}-${workItemId || 'adhoc'}-${Date.now()}`,
+    );
+
+    console.log(`[LGTM] Cloning default branch of ${project}/${repo} into ${clonePath}`);
+
+    try {
+      execSync(
+        `git clone --depth 50 "${cloneUrl}" "${clonePath}"`,
+        {
+          stdio: 'pipe',
+          timeout: 120000,
+          env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        },
+      );
+      console.log(`[LGTM] Clone complete: ${clonePath}`);
+    } catch (err) {
+      this._cleanup(clonePath);
+      const stderr = err.stderr ? err.stderr.toString() : err.message;
+      throw new Error(`Clone failed: ${stderr}`);
+    }
+
+    return { clonePath, cleanup: () => this._cleanup(clonePath) };
+  }
+
+  /**
    * Build a git clone URL with embedded PAT authentication.
    *
    * For dev.azure.com:
@@ -91,21 +123,22 @@ class RepoCloner {
    *   https://<pat>@<org>.visualstudio.com/<project>/_git/<repo>
    */
   _buildCloneUrl(pr) {
+    return this._buildCloneUrlFromParts(pr.project, pr.repo);
+  }
+
+  _buildCloneUrlFromParts(project, repo) {
     try {
       const u = new URL(this.orgUrl);
-      // Embed PAT as the password in the URL
       u.username = 'pat';
       u.password = this.pat;
-      // Append the project + repo path
-      const repoPath = `/${encodeURIComponent(pr.project)}/_git/${encodeURIComponent(pr.repo)}`;
+      const repoPath = `/${encodeURIComponent(project)}/_git/${encodeURIComponent(repo)}`;
       return `${u.origin}${u.pathname}${repoPath}`.replace(
         u.origin,
         `${u.protocol}//pat:${this.pat}@${u.host}`,
       );
     } catch {
-      // Fallback: construct manually
       const base = this.orgUrl.replace('https://', `https://pat:${this.pat}@`);
-      return `${base}/${encodeURIComponent(pr.project)}/_git/${encodeURIComponent(pr.repo)}`;
+      return `${base}/${encodeURIComponent(project)}/_git/${encodeURIComponent(repo)}`;
     }
   }
 
