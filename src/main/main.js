@@ -1,5 +1,6 @@
 const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, shell, dialog } = require('electron');
 const path = require('path');
+const { autoUpdater } = require('electron-updater');
 const { PatStore } = require('./pat-store');
 const { DevOpsClient } = require('./devops-client');
 const { AgentRunner } = require('./agent-runner');
@@ -17,6 +18,7 @@ let agentRunner = null;
 let agentRegistry = null;
 let webhookServer = null;
 let currentPat = null;
+let currentUser = null;
 
 const config = new ElectronStore({
   defaults: {
@@ -29,8 +31,58 @@ const config = new ElectronStore({
     repoConfigs: {},          // { "project/repo": { mode, repoFile, customPath } }
     starredRepos: [],         // ["project/repo", ...] — starred repos are reviewed first
     maxPrAgeDays: 7,          // only auto-review PRs created within this many days
+    lastUsedRepos: {},        // { [project]: "repoName" } — default for work item repo picker
+    bugsAgent: '',            // agent ID for bug runs (empty = fall back to defaultAgent)
+    bugsAgentModels: {},      // { [agentId]: modelId } for bug runs
+    bugsRepoConfigs: {},      // { "project/repo": "relative/path/to/prompt.md" }
+    ticketsAgent: '',         // agent ID for ticket runs
+    ticketsAgentModels: {},
+    ticketsRepoConfigs: {},
   },
 });
+
+// ── Auto-updater ────────────────────────────────────────────────────
+autoUpdater.autoDownload = false;       // Don't download until user says so
+autoUpdater.autoInstallOnAppQuit = true;
+autoUpdater.logger = console;
+
+function initAutoUpdater() {
+  autoUpdater.on('update-available', (info) => {
+    console.log('[LGTM] Update available:', info.version);
+    if (mainWindow) {
+      mainWindow.webContents.send('update-available', {
+        version: info.version,
+        releaseNotes: info.releaseNotes || '',
+      });
+    }
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    console.log('[LGTM] App is up to date');
+    if (mainWindow) mainWindow.webContents.send('update-not-available');
+  });
+
+  autoUpdater.on('download-progress', (progress) => {
+    if (mainWindow) {
+      mainWindow.webContents.send('update-download-progress', {
+        percent: Math.round(progress.percent),
+      });
+    }
+  });
+
+  autoUpdater.on('update-downloaded', () => {
+    console.log('[LGTM] Update downloaded, ready to install');
+    if (mainWindow) mainWindow.webContents.send('update-downloaded');
+  });
+
+  autoUpdater.on('error', (err) => {
+    console.error('[LGTM] Auto-updater error:', err.message);
+  });
+
+  // Check on launch, then every 4 hours
+  autoUpdater.checkForUpdates().catch(() => {});
+  setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 4 * 60 * 60 * 1000);
+}
 
 // ── Single-instance lock ─────────────────────────────────────────────
 const gotLock = app.requestSingleInstanceLock();
@@ -46,6 +98,7 @@ app.whenReady().then(async () => {
 
   createTray();
   createWindow();
+  initAutoUpdater();
 
   const existingPat = await patStore.get();
   const orgUrl = config.get('orgUrl');
@@ -73,9 +126,15 @@ function createTray() {
     ? 'tray-iconTemplate.png'
     : 'tray-icon-win.png';
   const iconPath = path.join(__dirname, '..', 'assets', iconFile);
-  let icon;
-  try { icon = nativeImage.createFromPath(iconPath); }
-  catch { icon = nativeImage.createEmpty(); }
+  let icon = nativeImage.createFromPath(iconPath);
+  if (icon.isEmpty()) {
+    console.warn('[LGTM] Tray icon not found at', iconPath, '— using fallback');
+    // 16x16 black dot as a visible fallback so the tray item always appears
+    icon = nativeImage.createFromDataURL(
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAKklEQVR42mNk+M9Qz0BBoAIGBob/DAwM9QQUMIwaMGrAqAGjBgyrMAAAFTsEEfnVaYoAAAAASUVORK5CYII='
+    );
+    if (process.platform === 'darwin') icon.setTemplateImage(true);
+  }
   if (process.platform === 'win32') icon = icon.resize({ width: 16, height: 16 });
   tray = new Tray(icon);
   tray.setToolTip('LGTM — PR Reviewer');
@@ -145,6 +204,18 @@ function showSettings() {
 async function initDevOps(pat, orgUrl) {
   devopsClient = new DevOpsClient(pat, orgUrl);
 
+  // Identify the authenticated user so the UI can flag "my PRs".
+  try {
+    currentUser = await devopsClient.getMe();
+    console.log(`[LGTM] Authenticated as: ${currentUser.displayName || currentUser.email || currentUser.id}`);
+    if (mainWindow) mainWindow.webContents.send('current-user', currentUser);
+    if (agentRunner) agentRunner.setIdentity(currentUser);
+  } catch (err) {
+    console.warn('[LGTM] Could not resolve current user:', err.message);
+    currentUser = null;
+    if (agentRunner) agentRunner.setIdentity(null);
+  }
+
   pollPrs();
   setInterval(pollPrs, config.get('pollingIntervalMs'));
 
@@ -204,10 +275,13 @@ ipcMain.handle('clear-pat', async () => {
   await patStore.delete();
   config.set('orgUrl', '');
   currentPat = null;
+  currentUser = null;
   devopsClient = null;
   if (webhookServer) webhookServer.stop();
   return { success: true };
 });
+
+ipcMain.handle('get-me', () => currentUser);
 
 // ── IPC: PRs ─────────────────────────────────────────────────────────
 
@@ -221,20 +295,100 @@ ipcMain.handle('refresh-prs', async () => {
   }
 });
 
+// ── IPC: Bugs ────────────────────────────────────────────────────────
+
+ipcMain.handle('refresh-bugs', async () => {
+  if (!devopsClient) return { success: false, error: 'Not authenticated' };
+  try {
+    const bugs = await devopsClient.getMyOpenBugs();
+    return { success: true, bugs };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('refresh-workitems', async () => {
+  if (!devopsClient) return { success: false, error: 'Not authenticated' };
+  try {
+    const items = await devopsClient.getMyOpenWorkItems();
+    return { success: true, items };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
 // ── IPC: Reviews ─────────────────────────────────────────────────────
 
-ipcMain.handle('review-pr', async (_event, { pr, agentId, model }) => {
+ipcMain.handle('review-pr', async (_event, { pr, agentId, model, mode }) => {
   const agent = agentId || config.get('defaultAgent') || 'claude';
   const mdl = model || config.get('agentModels')[agent] || null;
-  return agentRunner.startReview(pr, agent, mdl);
+  return agentRunner.startReview(pr, agent, mdl, mode || 'review');
+});
+
+ipcMain.handle('start-workitem-action', async (_event, { workItem, repoInfo, agentId, model, promptFile }) => {
+  const agent = agentId || config.get('defaultAgent') || 'claude';
+  const mdl = model || config.get('agentModels')[agent] || null;
+  // Persist last-used repo per project so the picker can default to it.
+  const lastUsed = { ...(config.get('lastUsedRepos') || {}) };
+  lastUsed[repoInfo.project] = repoInfo.repo;
+  config.set('lastUsedRepos', lastUsed);
+  return agentRunner.startWorkItemAction(workItem, repoInfo, agent, mdl, { promptFile });
+});
+
+ipcMain.handle('get-repos-for-project', async (_event, project) => {
+  if (!devopsClient) return { success: false, error: 'Not authenticated', repos: [] };
+  try {
+    const repos = await devopsClient.getRepos(project);
+    return {
+      success: true,
+      repos: (repos || []).map((r) => ({ id: r.id, name: r.name })),
+    };
+  } catch (err) {
+    return { success: false, error: err.message, repos: [] };
+  }
 });
 
 ipcMain.handle('get-reviews', () => {
   return agentRunner.getActiveReviews();
 });
 
+ipcMain.handle('cancel-review', (_event, key) => {
+  return agentRunner.cancelReview(key);
+});
+
 ipcMain.handle('get-review-output', (_event, key) => {
   return agentRunner.getReviewOutput(key);
+});
+
+ipcMain.handle('get-review-detail', (_event, key) => {
+  return agentRunner.getReviewDetail(key);
+});
+
+ipcMain.handle('rerun-review', async (_event, { key, agentId, model }) => {
+  return agentRunner.rerunReview(key, { agentId, model });
+});
+
+ipcMain.handle('open-path', (_event, p) => {
+  if (typeof p !== 'string' || !p) return { success: false, error: 'No path provided' };
+  // Pass to the OS shell — it picks Finder/Explorer based on platform.
+  return shell.openPath(p).then((err) => err ? { success: false, error: err } : { success: true });
+});
+
+ipcMain.handle('save-log-file', async (_event, { key, suggestedName }) => {
+  const review = agentRunner.getReviewDetail(key);
+  if (!review) return { success: false, error: 'No review found' };
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save agent log',
+    defaultPath: suggestedName || `lgtm-${key.replace(/[\\/:*?"<>|]/g, '_')}.log`,
+    filters: [{ name: 'Log', extensions: ['log', 'txt'] }, { name: 'All', extensions: ['*'] }],
+  });
+  if (result.canceled || !result.filePath) return { success: false, cancelled: true };
+  try {
+    require('fs').writeFileSync(result.filePath, review.output || '', 'utf8');
+    return { success: true, filePath: result.filePath };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
 });
 
 // ── IPC: Agents ──────────────────────────────────────────────────────
@@ -262,6 +416,13 @@ ipcMain.handle('get-settings', () => ({
   repoConfigs: config.get('repoConfigs'),
   starredRepos: config.get('starredRepos'),
   maxPrAgeDays: config.get('maxPrAgeDays'),
+  lastUsedRepos: config.get('lastUsedRepos'),
+  bugsAgent: config.get('bugsAgent'),
+  bugsAgentModels: config.get('bugsAgentModels'),
+  bugsRepoConfigs: config.get('bugsRepoConfigs'),
+  ticketsAgent: config.get('ticketsAgent'),
+  ticketsAgentModels: config.get('ticketsAgentModels'),
+  ticketsRepoConfigs: config.get('ticketsRepoConfigs'),
 }));
 
 ipcMain.handle('save-settings', async (_event, settings) => {
@@ -273,6 +434,13 @@ ipcMain.handle('save-settings', async (_event, settings) => {
   if (settings.repoConfigs !== undefined) config.set('repoConfigs', settings.repoConfigs);
   if (settings.starredRepos !== undefined) config.set('starredRepos', settings.starredRepos);
   if (settings.maxPrAgeDays !== undefined) config.set('maxPrAgeDays', settings.maxPrAgeDays);
+  if (settings.lastUsedRepos !== undefined) config.set('lastUsedRepos', settings.lastUsedRepos);
+  if (settings.bugsAgent !== undefined) config.set('bugsAgent', settings.bugsAgent);
+  if (settings.bugsAgentModels !== undefined) config.set('bugsAgentModels', settings.bugsAgentModels);
+  if (settings.bugsRepoConfigs !== undefined) config.set('bugsRepoConfigs', settings.bugsRepoConfigs);
+  if (settings.ticketsAgent !== undefined) config.set('ticketsAgent', settings.ticketsAgent);
+  if (settings.ticketsAgentModels !== undefined) config.set('ticketsAgentModels', settings.ticketsAgentModels);
+  if (settings.ticketsRepoConfigs !== undefined) config.set('ticketsRepoConfigs', settings.ticketsRepoConfigs);
   return { success: true };
 });
 
@@ -294,6 +462,23 @@ ipcMain.handle('get-repo-file-tree', async (_event, { project, repoName }) => {
     return { success: false, error: err.message, files: [] };
   }
 });
+
+// ── IPC: External URL ────────────────────────────────────────────────
+
+ipcMain.handle('open-external', (_event, url) => {
+  if (typeof url !== 'string') return { success: false };
+  // Only allow http(s) to avoid opening arbitrary schemes from the renderer.
+  if (!/^https?:\/\//i.test(url)) return { success: false };
+  shell.openExternal(url);
+  return { success: true };
+});
+
+// ── IPC: Auto-updater ──────────────────────────────────────────────
+
+ipcMain.handle('check-for-update', () => autoUpdater.checkForUpdates().catch(() => null));
+ipcMain.handle('download-update', () => autoUpdater.downloadUpdate().catch(() => null));
+ipcMain.handle('install-update', () => autoUpdater.quitAndInstall(false, true));
+ipcMain.handle('get-app-version', () => app.getVersion());
 
 // ── IPC: Native file picker ─────────────────────────────────────────
 

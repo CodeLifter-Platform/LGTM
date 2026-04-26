@@ -49,6 +49,13 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "CodeLifterIO",
+        "repo": "LGTM"
+      }
+    ],
     "extraResources": [
       {
         "from": "resources/LGTM_REVIEW_PROMPT.md",
@@ -57,12 +64,18 @@
       {
         "from": "resources/REPO_REVIEW_TEMPLATE.md",
         "to": "REPO_REVIEW_TEMPLATE.md"
+      },
+      {
+        "from": "resources/prompts",
+        "to": "prompts"
       }
     ]
   },
   "dependencies": {
     "axios": "^1.7.0",
+    "azure-devops-node-api": "^14.1.0",
     "electron-store": "^8.2.0",
+    "electron-updater": "^6.3.0",
     "keytar": "^7.9.0",
     "marked": "^12.0.0"
   },

@@ -4,12 +4,33 @@ contextBridge.exposeInMainWorld('lgtm', {
   // PAT
   validatePat: (pat, orgUrl) => ipcRenderer.invoke('validate-pat', { pat, orgUrl }),
   clearPat: () => ipcRenderer.invoke('clear-pat'),
+  getMe: () => ipcRenderer.invoke('get-me'),
+  onCurrentUser: (cb) => ipcRenderer.on('current-user', (_e, u) => cb(u)),
 
   // PRs
   refreshPrs: () => ipcRenderer.invoke('refresh-prs'),
-  reviewPr: ({ pr, agentId, model }) => ipcRenderer.invoke('review-pr', { pr, agentId, model }),
+
+  // Bugs
+  refreshBugs: () => ipcRenderer.invoke('refresh-bugs'),
+
+  // Work items (non-bug tickets)
+  refreshWorkItems: () => ipcRenderer.invoke('refresh-workitems'),
+
+
+  // External
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
+
+  reviewPr: ({ pr, agentId, model, mode }) => ipcRenderer.invoke('review-pr', { pr, agentId, model, mode }),
+  startWorkItemAction: ({ workItem, repoInfo, agentId, model, promptFile }) =>
+    ipcRenderer.invoke('start-workitem-action', { workItem, repoInfo, agentId, model, promptFile }),
+  getReposForProject: (project) => ipcRenderer.invoke('get-repos-for-project', project),
+  cancelReview: (key) => ipcRenderer.invoke('cancel-review', key),
   getReviews: () => ipcRenderer.invoke('get-reviews'),
   getReviewOutput: (key) => ipcRenderer.invoke('get-review-output', key),
+  getReviewDetail: (key) => ipcRenderer.invoke('get-review-detail', key),
+  rerunReview: ({ key, agentId, model }) => ipcRenderer.invoke('rerun-review', { key, agentId, model }),
+  openPath: (path) => ipcRenderer.invoke('open-path', path),
+  saveLogFile: ({ key, suggestedName }) => ipcRenderer.invoke('save-log-file', { key, suggestedName }),
 
   // Agents
   getAgents: () => ipcRenderer.invoke('get-agents'),
@@ -25,6 +46,16 @@ contextBridge.exposeInMainWorld('lgtm', {
   // Starred repos
   getStarredRepos: () => ipcRenderer.invoke('get-settings').then((s) => s.starredRepos || []),
   saveStarredRepos: (repos) => ipcRenderer.invoke('save-settings', { starredRepos: repos }),
+
+  // Auto-updater
+  checkForUpdate: () => ipcRenderer.invoke('check-for-update'),
+  downloadUpdate: () => ipcRenderer.invoke('download-update'),
+  installUpdate: () => ipcRenderer.invoke('install-update'),
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  onUpdateAvailable: (cb) => ipcRenderer.on('update-available', (_e, info) => cb(info)),
+  onUpdateNotAvailable: (cb) => ipcRenderer.on('update-not-available', () => cb()),
+  onUpdateDownloadProgress: (cb) => ipcRenderer.on('update-download-progress', (_e, p) => cb(p)),
+  onUpdateDownloaded: (cb) => ipcRenderer.on('update-downloaded', () => cb()),
 
   // Events from main → renderer
   onPrList: (cb) => ipcRenderer.on('pr-list', (_e, prs) => cb(prs)),

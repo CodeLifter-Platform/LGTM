@@ -5,6 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LGTM</title>
   <link rel="stylesheet" href="styles.css">
+  <script>
+    // Apply persisted theme before body renders to avoid a flash.
+    try {
+      if (localStorage.getItem('lgtm-theme') === 'light') {
+        document.documentElement.classList.add('light');
+      }
+    } catch (e) { /* ignore */ }
+  </script>
 </head>
 <body>
   <!-- ─── Draggable title bar ─────────────────────────────── -->
@@ -23,7 +31,17 @@
     </svg>
     <span class="logo">LGTM</span>
     <span class="subtitle" id="subtitle"></span>
+    <button id="theme-toggle" class="btn-theme-toggle" title="Toggle light/dark">&#9790;</button>
   </header>
+
+  <!-- ─── Update banner ───────────────────────────────────── -->
+  <div id="update-banner" class="update-banner hidden">
+    <span id="update-message">A new version is available!</span>
+    <div class="update-actions">
+      <button id="update-action-btn" class="btn-update">Download</button>
+      <button id="update-dismiss-btn" class="btn-update-dismiss">&times;</button>
+    </div>
+  </div>
 
   <!-- ─── PAT Setup (first-run gate) ─────────────────────── -->
   <section id="pat-setup" class="view">
@@ -43,35 +61,133 @@
     </div>
   </section>
 
-  <!-- ─── Main PR list ────────────────────────────────────── -->
+  <!-- ─── Main view: PRs + Bugs tabs ──────────────────────── -->
   <section id="pr-list-view" class="view hidden">
+    <!-- Global toolbar: applies to all tabs -->
     <div class="toolbar">
       <select id="agent-select" class="agent-select" title="Select review agent"></select>
       <button id="auto-review-btn" class="btn-auto-review" title="Auto-review all PRs (starred repos first)">&#9654;</button>
-      <button id="refresh-btn" class="btn-icon" title="Refresh PRs">↻</button>
+      <button id="refresh-btn" class="btn-icon" title="Refresh">↻</button>
       <button id="settings-btn" class="btn-icon" title="Settings">⚙</button>
     </div>
 
-    <div id="pr-list" class="pr-list">
-      <div class="loading">Loading PRs…</div>
+    <div class="tab-strip" role="tablist">
+      <button id="tab-prs" class="tab active" role="tab" aria-selected="true">PRs</button>
+      <button id="tab-bugs" class="tab" role="tab" aria-selected="false">
+        Bugs <span id="bugs-tab-count" class="tab-count hidden">0</span>
+      </button>
+      <button id="tab-tickets" class="tab" role="tab" aria-selected="false">
+        Tickets <span id="tickets-tab-count" class="tab-count hidden">0</span>
+      </button>
     </div>
 
-    <div id="no-prs" class="empty-state hidden">
-      <p>No open pull requests found.</p>
+    <!-- Tab pane: PRs -->
+    <div id="tab-pane-prs" class="tab-pane">
+      <div id="pr-list" class="pr-list">
+        <div class="loading">Loading PRs…</div>
+      </div>
+
+      <div id="no-prs" class="empty-state hidden">
+        <p>No open pull requests found.</p>
+      </div>
+    </div>
+
+    <!-- Tab pane: Bugs -->
+    <div id="tab-pane-bugs" class="tab-pane hidden">
+      <div class="toolbar tab-toolbar">
+        <select id="bugs-agent-select" class="agent-select" title="Bug agent"></select>
+        <button id="bugs-settings-btn" class="btn-icon" title="Bugs settings">⚙</button>
+      </div>
+      <div class="bugs-hint">Open bugs <strong>assigned to you</strong>, grouped by project · sorted by priority within each</div>
+
+      <div id="bug-list" class="pr-list">
+        <div class="loading">Loading bugs…</div>
+      </div>
+
+      <div id="no-bugs" class="empty-state hidden">
+        <p>No open bugs assigned to you.</p>
+      </div>
+    </div>
+
+    <!-- Tab pane: Tickets (non-bug work items) -->
+    <div id="tab-pane-tickets" class="tab-pane hidden">
+      <div class="toolbar tab-toolbar">
+        <select id="tickets-agent-select" class="agent-select" title="Ticket agent"></select>
+        <button id="tickets-settings-btn" class="btn-icon" title="Tickets settings">⚙</button>
+      </div>
+      <div class="bugs-hint">Open tickets <strong>assigned to you</strong>, grouped by project · sorted by sprint recency</div>
+
+      <div id="ticket-list" class="pr-list">
+        <div class="loading">Loading tickets…</div>
+      </div>
+
+      <div id="no-tickets" class="empty-state hidden">
+        <p>No open tickets assigned to you.</p>
+      </div>
     </div>
   </section>
 
   <!-- ─── Review detail panel ─────────────────────────────── -->
   <section id="review-detail-view" class="view hidden">
     <div class="review-detail-header">
-      <button id="review-back-btn" class="btn-icon" title="Back to PR list">←</button>
+      <button id="review-back-btn" class="btn-icon" title="Back to list">←</button>
       <div class="review-detail-info">
         <span id="review-detail-title" class="review-detail-title"></span>
         <span id="review-detail-meta" class="review-detail-meta"></span>
       </div>
+      <span id="review-elapsed" class="review-elapsed" title="Elapsed time"></span>
+      <button id="review-detail-cancel-btn" class="btn-cancel-review hidden" title="Cancel review">&#10005;</button>
       <div id="review-detail-dot" class="status-dot"></div>
     </div>
-    <div id="review-output" class="review-output"></div>
+
+    <div class="review-detail-actions">
+      <button id="rd-open-ado" class="btn-detail-action" title="Open in Azure DevOps">Open in DevOps</button>
+      <button id="rd-open-clone" class="btn-detail-action hidden" title="Reveal cloned repo in file browser">Reveal clone</button>
+      <button id="rd-copy" class="btn-detail-action" title="Copy log to clipboard">Copy log</button>
+      <button id="rd-save" class="btn-detail-action" title="Save log to file">Save log</button>
+      <div class="rd-rerun-group">
+        <button id="rd-rerun" class="btn-detail-action" title="Re-run with same agent and model">Re-run</button>
+        <button id="rd-rerun-menu" class="btn-detail-action rd-rerun-menu" title="Re-run with different agent / model">▾</button>
+      </div>
+    </div>
+
+    <div id="rd-rerun-popover" class="rd-rerun-popover hidden">
+      <label>Agent</label>
+      <select id="rd-rerun-agent"></select>
+      <label>Model</label>
+      <select id="rd-rerun-model"></select>
+      <div class="btn-row">
+        <button id="rd-rerun-confirm" class="btn-primary">Re-run</button>
+        <button id="rd-rerun-cancel" class="btn-secondary">Cancel</button>
+      </div>
+    </div>
+
+    <div id="rd-timeline" class="review-detail-timeline"></div>
+
+    <div id="rd-report" class="review-detail-report hidden"></div>
+
+    <details id="rd-prompt-section" class="review-detail-section">
+      <summary>
+        <span class="rd-section-title">Dispatched prompt</span>
+        <span class="rd-section-meta" id="rd-prompt-meta"></span>
+      </summary>
+      <pre id="rd-prompt" class="review-detail-prompt"></pre>
+    </details>
+
+    <details id="rd-output-section" class="review-detail-section" open>
+      <summary>
+        <span class="rd-section-title">Agent output</span>
+        <span class="rd-section-meta" id="rd-output-meta"></span>
+        <span class="review-output-tools">
+          <input id="rd-search" type="search" placeholder="Search log…" autocomplete="off" spellcheck="false">
+          <label class="follow-tail-label" title="Auto-scroll to the latest output">
+            <input type="checkbox" id="rd-follow-tail" checked> Follow
+          </label>
+        </span>
+      </summary>
+      <div id="review-output" class="review-output"></div>
+      <button id="rd-jump-bottom" class="rd-jump-bottom hidden" type="button">Jump to latest ↓</button>
+    </details>
   </section>
 
   <!-- ─── Settings panel ──────────────────────────────────── -->
@@ -118,6 +234,60 @@
 
         <hr>
         <button id="disconnect-btn" class="btn-danger">Disconnect &amp; Clear PAT</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── Bugs settings panel ─────────────────────────────── -->
+  <section id="bugs-settings-view" class="view hidden">
+    <div class="settings-scroll">
+      <div class="card">
+        <h2>Bugs — Agent</h2>
+        <p class="hint">Agent used when you run work against a bug.</p>
+        <div id="bugs-agent-config-list" class="agent-config-list"></div>
+      </div>
+
+      <div class="card">
+        <h2>Bugs — Repo Prompt Files</h2>
+        <p class="hint">Pick a prompt file from each repo. When you start an agent on a bug and choose that repo, this file is appended to the work-item prompt.</p>
+        <div id="bugs-repo-prompt-list" class="repo-config-list"></div>
+        <div class="btn-row" style="margin-top: 10px;">
+          <button id="bugs-add-repo-btn" class="btn-secondary">+ Add repo</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="btn-row">
+          <button id="bugs-settings-save" class="btn-primary">Save</button>
+          <button id="bugs-settings-back" class="btn-secondary">Back</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── Tickets settings panel ──────────────────────────── -->
+  <section id="tickets-settings-view" class="view hidden">
+    <div class="settings-scroll">
+      <div class="card">
+        <h2>Tickets — Agent</h2>
+        <p class="hint">Agent used when you run work against a ticket (non-bug work item).</p>
+        <div id="tickets-agent-config-list" class="agent-config-list"></div>
+      </div>
+
+      <div class="card">
+        <h2>Tickets — Repo Prompt Files</h2>
+        <p class="hint">Pick a prompt file from each repo. When you start an agent on a ticket and choose that repo, this file is appended to the work-item prompt.</p>
+        <div id="tickets-repo-prompt-list" class="repo-config-list"></div>
+        <div class="btn-row" style="margin-top: 10px;">
+          <button id="tickets-add-repo-btn" class="btn-secondary">+ Add repo</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="btn-row">
+          <button id="tickets-settings-save" class="btn-primary">Save</button>
+          <button id="tickets-settings-back" class="btn-secondary">Back</button>
+        </div>
       </div>
     </div>
   </section>
