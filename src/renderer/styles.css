@@ -958,7 +958,15 @@ hr {
   border-radius: 6px;
   background: rgba(76, 201, 240, 0.04);
   flex-shrink: 0;
+  /* Bound the report so a long notes blob doesn't crowd out the output
+     panel below. Above this it scrolls inside its own card. */
+  max-height: 30vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
 }
+.review-detail-report::-webkit-scrollbar { width: 5px; }
+.review-detail-report::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 .report-title {
   font-size: 12px;
   text-transform: uppercase;
@@ -1111,9 +1119,16 @@ hr {
   font-size: 11px;
   line-height: 1.5;
   white-space: pre-wrap;
+  /* `overflow-wrap: anywhere` is the standard, aggressive break — it
+     splits unbreakable tokens (URLs, tokens, long paths) so they don't
+     blow out the panel width. `word-break: break-word` is left as a
+     legacy fallback for older WebKit. */
+  overflow-wrap: anywhere;
   word-break: break-word;
   overflow-y: auto;
+  overflow-x: hidden;
   min-height: 0;
+  min-width: 0;
 }
 .review-detail-prompt::-webkit-scrollbar { width: 5px; }
 .review-detail-prompt::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
@@ -1122,13 +1137,18 @@ hr {
 .review-output {
   flex: 1 1 auto;
   overflow-y: auto;
+  /* Containing block must clip horizontally — long tokens inside
+     <pre> blocks have their own overflow-x: auto, but plain prose
+     should wrap rather than push the panel wider. */
+  overflow-x: hidden;
   padding: 14px;
   font-size: 13px;
   line-height: 1.6;
   color: var(--text);
-  word-wrap: break-word;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   min-height: 0;
+  min-width: 0;
 }
 .review-output mark {
   background: rgba(243, 156, 18, 0.4);

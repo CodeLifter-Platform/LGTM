@@ -19,6 +19,11 @@ const { RepoCloner } = require('./repo-cloner');
 const { PromptResolver } = require('./prompt-resolver');
 const { DevOpsClient } = require('./devops-client');
 const { ScenarioPrompts } = require('./scenario-prompts');
+const {
+  downloadInlineImages,
+  applySubstitutions,
+  renderImagesSection,
+} = require('./prompt-attachments');
 
 function formatIdentity(user) {
   if (!user) return '';
@@ -204,6 +209,17 @@ class AgentRunner {
     if (!agent) return { success: false, error: `Unknown agent: ${agentId}` };
     if (!agent.available) return { success: false, error: `${agent.name} is not installed.` };
 
+    // Pre-flight auth check. Fast, side-effect-free — catches the
+    // "logged out" case before we waste 30s on a clone.
+    if (typeof agent.authCheck === 'function') {
+      const auth = agent.authCheck();
+      if (!auth.ok) {
+        const msg = auth.hint ? `${auth.error} ${auth.hint}` : auth.error;
+        console.warn(`[LGTM] Auth check failed for ${agentId}: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+
     // Create review record immediately so UI shows "cloning" state
     const now = Date.now();
     const review = {
@@ -281,13 +297,29 @@ class AgentRunner {
         }
       }
 
+      // Fetch the PR description (the list endpoint omits it) so the
+      // agent has full author intent — and so we can scan it for
+      // inline screenshots.
+      let prDescription = '';
+      try {
+        const full = await this.devopsClient.getPullRequest(pr.project, pr.repoId, pr.id);
+        prDescription = full.description || '';
+      } catch (err) {
+        console.warn(`[LGTM] Could not fetch PR description: ${err.message}`);
+      }
+
       // Fetch existing PR threads for re-review awareness
       let existingThreadsSummary = '';
+      let threadCommentHtml = []; // collected separately so we can scan for images
       try {
         const threads = await this.devopsClient.getPrThreads(pr.project, pr.repoId, pr.id);
         const reviewThreads = threads.filter((t) =>
           t.comments.length > 0 && t.comments[0].commentType === 1
         );
+
+        for (const t of reviewThreads) {
+          for (const c of t.comments) threadCommentHtml.push(c.content || '');
+        }
 
         if (reviewThreads.length > 0) {
           const threadLines = reviewThreads.map((t) => {
@@ -307,6 +339,13 @@ class AgentRunner {
       } catch (err) {
         console.warn(`[LGTM] Could not fetch existing threads: ${err.message}`);
       }
+
+      // Pull inline images from PR description + comment threads.
+      const prImages = await this._materializeImages(
+        key, review,
+        [prDescription, ...threadCommentHtml],
+        clonePath,
+      );
 
       const sourceBranch = pr.sourceBranch.replace('refs/heads/', '');
       const targetBranch = pr.targetBranch.replace('refs/heads/', '');
@@ -334,6 +373,28 @@ class AgentRunner {
       }
       if (repoPrompt) {
         extraSections.push({ title: 'Project-Specific Rules', body: repoPrompt });
+      }
+      if (prDescription) {
+        const stripped = applySubstitutions(prDescription, prImages.substitutions)
+          .replace(/<br\s*\/?>/gi, '\n')
+          .replace(/<\/p>/gi, '\n\n')
+          .replace(/<[^>]+>/g, '')
+          .replace(/&nbsp;/g, ' ')
+          .replace(/&amp;/g, '&')
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+        if (stripped) {
+          extraSections.push({ title: 'PR Description', body: stripped });
+        }
+      }
+      if (prImages.downloaded.length > 0) {
+        extraSections.push({
+          title: 'Attached Images',
+          body: renderImagesSection(prImages.downloaded),
+        });
       }
       if (existingThreadsSummary) {
         extraSections.push({
@@ -488,6 +549,17 @@ class AgentRunner {
     if (!agent) return { success: false, error: `Unknown agent: ${agentId}` };
     if (!agent.available) return { success: false, error: `${agent.name} is not installed.` };
 
+    // Pre-flight auth check. Fast, side-effect-free — catches the
+    // "logged out" case before we waste 30s on a clone.
+    if (typeof agent.authCheck === 'function') {
+      const auth = agent.authCheck();
+      if (!auth.ok) {
+        const msg = auth.hint ? `${auth.error} ${auth.hint}` : auth.error;
+        console.warn(`[LGTM] Auth check failed for ${agentId}: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+
     const now = Date.now();
     const review = {
       workItem,
@@ -557,6 +629,15 @@ class AgentRunner {
         console.warn(`[LGTM] Could not fetch work item details: ${err.message}`);
       }
 
+      // Pull any inline images out of the HTML fields so the agent can
+      // see screenshots, error dialogs, design mockups, etc. via its
+      // file-read / vision tools. Skipped silently if nothing matches.
+      const wiImages = await this._materializeImages(
+        key, review,
+        [details.description, details.reproSteps, details.systemInfo, details.acceptanceCriteria],
+        clonePath,
+      );
+
       const scenarioId = 'implement-ticket';
       review.scenarioId = scenarioId;
 
@@ -572,8 +653,14 @@ class AgentRunner {
       };
 
       const extraSections = [
-        { title: 'Pre-fetched Work Item Details', body: this._renderWorkItemDetails(details, repoInfo) },
+        { title: 'Pre-fetched Work Item Details', body: this._renderWorkItemDetails(details, repoInfo, wiImages.substitutions) },
       ];
+      if (wiImages.downloaded.length > 0) {
+        extraSections.push({
+          title: 'Attached Images',
+          body: renderImagesSection(wiImages.downloaded),
+        });
+      }
 
       // Append repo-specific prompt file if configured.
       if (options.promptFile) {
@@ -719,8 +806,49 @@ class AgentRunner {
     }
   }
 
-  _renderWorkItemDetails(details, repoInfo) {
-    const stripHtml = (html) => (html || '')
+  /**
+   * Scan a list of HTML blobs (work-item description, repro steps, PR
+   * description, comment thread bodies, …) for inline `<img>` tags
+   * pointing at the configured DevOps org, download each one into
+   * `<clonePath>/.lgtm-attachments/`, and surface the result as a
+   * substitution map plus a downloaded list. Surfaces a one-line diag
+   * in the detail panel so the user can see what was pulled (or why
+   * nothing was).
+   *
+   * Returns the same shape as downloadInlineImages even on failure so
+   * callers can dereference `.substitutions` / `.downloaded`
+   * unconditionally.
+   */
+  async _materializeImages(key, review, htmlBlobs, clonePath) {
+    const empty = { dir: '', downloaded: [], skipped: [], substitutions: new Map() };
+    if (!this.devopsClient) return empty;
+    try {
+      const result = await downloadInlineImages(htmlBlobs, {
+        devopsClient: this.devopsClient,
+        clonePath,
+        logger: (line) => console.log(`[LGTM] attachments: ${line}`),
+      });
+      if (result.downloaded.length > 0) {
+        this._pushDiag(key, review,
+          `[LGTM] Downloaded ${result.downloaded.length} attached image(s) → ${result.dir.replace(clonePath, '.')}`);
+      }
+      if (result.skipped.length > 0) {
+        const reasons = result.skipped.map((s) => s.reason).filter(Boolean);
+        const summary = reasons.length > 0 ? ` (${[...new Set(reasons)].slice(0, 2).join('; ')})` : '';
+        this._pushDiag(key, review,
+          `[LGTM] Skipped ${result.skipped.length} non-DevOps image link(s)${summary}`);
+      }
+      return result;
+    } catch (err) {
+      console.warn(`[LGTM] Image download pass failed: ${err.message}`);
+      this._pushDiag(key, review, `[LGTM] Image download pass failed: ${err.message}`);
+      return empty;
+    }
+  }
+
+  _renderWorkItemDetails(details, repoInfo, imageSubs = null) {
+    const subbed = (html) => (imageSubs ? applySubstitutions(html || '', imageSubs) : (html || ''));
+    const stripHtml = (html) => subbed(html)
       .replace(/<br\s*\/?>/gi, '\n')
       .replace(/<\/p>/gi, '\n\n')
       .replace(/<[^>]+>/g, '')

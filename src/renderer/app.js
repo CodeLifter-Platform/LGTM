@@ -265,24 +265,33 @@ patSubmit.addEventListener('click', async () => {
 
   const result = await window.lgtm.validatePat(pat, orgUrl);
   if (result.success) {
-    setPatMsg(`Connected! Found ${result.projects.length} project(s).`, 'success');
-    await loadAgents();
-    setTimeout(() => {
-      showView(prListView);
-      subtitleEl.textContent = orgUrl.replace('https://dev.azure.com/', '');
-      if (!bugsLoaded) {
-        bugsLoaded = true;
-        window.lgtm.refreshBugs().then((r) => {
-          if (r && r.success) renderBugList(r.bugs);
-        }).catch(() => {});
-      }
-      if (!ticketsLoaded) {
-        ticketsLoaded = true;
-        window.lgtm.refreshWorkItems().then((r) => {
-          if (r && r.success) renderTicketList(r.items);
-        }).catch(() => {});
-      }
-    }, 800);
+    // Load agents + settings BEFORE switching views — the toolbar
+    // agent dropdown, per-tab agent dropdowns, repo config buttons,
+    // and starred-repo state all render against the `agents` /
+    // `repoConfigs` / `starredRepos` globals that this populates.
+    // It's two fast IPC calls (<100ms), no network — safe to await.
+    try {
+      await loadAgents();
+    } catch (err) {
+      console.warn('[LGTM] loadAgents failed:', err.message);
+    }
+
+    showView(prListView);
+    subtitleEl.textContent = orgUrl.replace('https://dev.azure.com/', '');
+    setPatMsg('');
+
+    if (!bugsLoaded) {
+      bugsLoaded = true;
+      window.lgtm.refreshBugs().then((r) => {
+        if (r && r.success) renderBugList(r.bugs);
+      }).catch(() => {});
+    }
+    if (!ticketsLoaded) {
+      ticketsLoaded = true;
+      window.lgtm.refreshWorkItems().then((r) => {
+        if (r && r.success) renderTicketList(r.items);
+      }).catch(() => {});
+    }
   } else {
     setPatMsg(result.error, 'error');
   }
@@ -2391,6 +2400,17 @@ disconnectBtn.addEventListener('click', async () => {
 // ── IPC listeners ────────────────────────────────────────────────
 window.lgtm.onPrList((prs) => renderPrList(prs));
 window.lgtm.onPrError((msg) => console.error('[LGTM] PR fetch error:', msg));
+
+// Background model discovery completed — overlay the freshly
+// discovered models on top of the hardcoded fallback so the toolbar
+// and tab dropdowns pick up new releases (e.g. Opus 4.7) without a
+// restart. Settings panels re-render when reopened.
+window.lgtm.onAgentsUpdated((updated) => {
+  if (!Array.isArray(updated) || updated.length === 0) return;
+  agents = updated;
+  renderAgentSelect();
+  renderTabAgentSelects();
+});
 
 window.lgtm.onCurrentUser((u) => {
   currentUser = u;

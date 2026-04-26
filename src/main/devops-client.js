@@ -9,6 +9,9 @@
  * SDK docs: https://github.com/microsoft/azure-devops-node-api
  */
 
+const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 const azdev = require('azure-devops-node-api');
 const gitInterfaces = require('azure-devops-node-api/interfaces/GitInterfaces');
 const witInterfaces = require('azure-devops-node-api/interfaces/WorkItemTrackingInterfaces');
@@ -85,6 +88,39 @@ class DevOpsClient {
   }
 
   // ── Authenticated user ───────────────────────────────────────────
+
+  /**
+   * Hostname of the configured DevOps org (e.g. "dev.azure.com" or
+   * "myorg.visualstudio.com"). Used to decide whether a given image
+   * URL is hosted by DevOps and therefore safe to fetch with our PAT.
+   */
+  get orgHost() {
+    try { return new URL(this.orgUrl).hostname; } catch { return ''; }
+  }
+
+  /**
+   * GET an arbitrary DevOps URL with PAT auth and stream the body to
+   * `destPath`. Returns { contentType, bytes }. Caller is responsible
+   * for ensuring `destPath`'s parent directory exists.
+   *
+   * Only call this for URLs you trust to be hosted by your DevOps org —
+   * otherwise the PAT goes to a third party. The image-extraction
+   * helper enforces that filter before calling here.
+   */
+  async downloadAttachment(url, destPath) {
+    const auth = Buffer.from(`:${this.pat}`).toString('base64');
+    const res = await axios.get(url, {
+      responseType: 'arraybuffer',
+      maxRedirects: 5,
+      timeout: 30000,
+      headers: { Authorization: `Basic ${auth}`, Accept: '*/*' },
+    });
+    fs.writeFileSync(destPath, Buffer.from(res.data));
+    return {
+      contentType: (res.headers['content-type'] || '').toLowerCase(),
+      bytes: res.data.length,
+    };
+  }
 
   async getMe() {
     const loc = await this._getLoc();
@@ -201,6 +237,25 @@ class DevOpsClient {
     if (!this._fileTreeCache) this._fileTreeCache = {};
     this._fileTreeCache[cacheKey] = paths;
     return paths;
+  }
+
+  /**
+   * Fetch a single PR with its full body (description). The PR list
+   * endpoint omits the description, so we hit the per-PR endpoint when
+   * we need it (e.g. to scan for inline images before dispatching a
+   * review).
+   */
+  async getPullRequest(project, repoId, prId) {
+    const git = await this._getGit();
+    const pr = await git.getPullRequestById(prId, project);
+    return {
+      id: pr.pullRequestId,
+      title: pr.title || '',
+      description: pr.description || '',
+      sourceBranch: pr.sourceRefName || '',
+      targetBranch: pr.targetRefName || '',
+      repoId: (pr.repository && pr.repository.id) || repoId,
+    };
   }
 
   // ── PR Comments / Threads ────────────────────────────────────────

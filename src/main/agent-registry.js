@@ -10,7 +10,10 @@
  */
 
 const { execSync } = require('child_process');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const { discoverModelsFor } = require('./model-discovery');
 
 /**
  * Electron apps on macOS don't inherit the user's shell PATH when launched
@@ -103,11 +106,67 @@ process.env.PATH = getEnhancedPath();
 console.log(`[LGTM] Effective PATH (${process.env.PATH.split(SEP).length} entries)`);
 
 /**
+ * Pre-flight auth checks. Each returns { ok: true } or
+ * { ok: false, error, hint }. The runner calls these before cloning so a
+ * logged-out agent fails in 50ms instead of after a 30s clone + 60s
+ * silent hang.
+ *
+ * Checks must be cheap and side-effect-free: a file stat or a `security`
+ * lookup without `-g` (so no keychain prompt fires). They are NOT
+ * authoritative — an agent can still 401 mid-run if the token is
+ * expired. They just catch the obvious "not logged in at all" case.
+ */
+function checkClaudeAuth() {
+  if (process.env.ANTHROPIC_API_KEY) return { ok: true };
+  if (process.platform !== 'darwin') {
+    // claude on Linux/Windows uses different storage we don't currently
+    // probe — don't block, let the spawn surface the real error.
+    return { ok: true };
+  }
+  try {
+    execSync('security find-generic-password -s "Claude Code-credentials"', {
+      stdio: 'ignore',
+      timeout: 3000,
+    });
+    return { ok: true };
+  } catch {
+    return {
+      ok: false,
+      error: 'Claude is not logged in.',
+      hint: 'Run `claude /login` once in a terminal, or set ANTHROPIC_API_KEY.',
+    };
+  }
+}
+
+function checkAuggieAuth() {
+  const sessionPath = path.join(os.homedir(), '.augment', 'session.json');
+  try {
+    const raw = fs.readFileSync(sessionPath, 'utf8');
+    const session = JSON.parse(raw);
+    if (session && session.accessToken) return { ok: true };
+    return {
+      ok: false,
+      error: 'Auggie session file is missing an access token.',
+      hint: 'Run `auggie --login` (or whatever your version uses) in a terminal.',
+    };
+  } catch {
+    return {
+      ok: false,
+      error: 'Auggie is not logged in.',
+      hint: `No session at ~/.augment/session.json. Run \`auggie\` once in a terminal and complete sign-in.`,
+    };
+  }
+}
+
+/**
  * Agent definitions.
  *
  * `buildCmd` now returns { command, args, stdinPrompt } where:
  *   - command/args do NOT contain the prompt text (avoids shell escaping issues)
  *   - stdinPrompt: boolean — if true, the prompt should be piped via stdin
+ *
+ * Each agent may also declare an `authCheck()` returning { ok, error?, hint? }
+ * that the runner calls before cloning.
  *
  * The AgentRunner writes the prompt to a temp file and handles piping.
  */
@@ -120,6 +179,7 @@ const AGENTS = [
       { id: 'claude-opus-4-6',   label: 'Claude Opus 4.6' },
       { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
     ],
+    authCheck: checkClaudeAuth,
     // claude -p reads the prompt from stdin and prints the result.
     // bypassPermissions is required for autonomous (non-interactive)
     // runs — without it, claude will hang the first time it wants to
@@ -158,6 +218,7 @@ const AGENTS = [
       { id: 'o4-mini',    label: 'o4-mini' },
       { id: 'o3',         label: 'o3' },
     ],
+    authCheck: checkAuggieAuth,
     buildCmd: (_prompt, model, resolvedCli) => {
       // --print forces non-interactive (one-shot) mode and reads the
       // instruction from stdin. Without it, auggie warns "Interactive
@@ -173,18 +234,21 @@ const AGENTS = [
 
 class AgentRegistry {
   constructor() {
-    this._cache = null; // { agentId → boolean }
+    this._cache = null;        // { agentId → boolean }
+    this._modelCache = {};     // { agentId → [{id,label}] } — discovered, overlays hardcoded
   }
 
   /**
-   * Return all agent definitions with an `available` flag.
-   * Results are cached; call refresh() to re-detect.
+   * Return all agent definitions with an `available` flag and the most
+   * up-to-date model list (discovered if available, otherwise the
+   * hardcoded fallback).
    */
   getAll() {
     if (!this._cache) this.refresh();
 
     return AGENTS.map((agent) => ({
       ...agent,
+      models: this._modelCache[agent.id] || agent.models,
       available: this._cache[agent.id] || false,
     }));
   }
@@ -245,6 +309,48 @@ class AgentRegistry {
    */
   getResolvedPath(agentId) {
     return (this._resolvedCli && this._resolvedCli[agentId]) || null;
+  }
+
+  /**
+   * Ask each available agent which models its current login can use,
+   * and overlay the result on the hardcoded list. Discovery is best-
+   * effort: if any single agent fails, its hardcoded fallback stays
+   * in place and the others still update. Runs all discoverers in
+   * parallel.
+   *
+   * Returns a map of { agentId → 'updated' | 'fallback' | 'unavailable' }
+   * so callers can log/log-and-notify.
+   */
+  async refreshModels() {
+    if (!this._cache) this.refresh();
+    const status = {};
+    const tasks = [];
+    for (const agent of AGENTS) {
+      if (!this._cache[agent.id]) {
+        status[agent.id] = 'unavailable';
+        continue;
+      }
+      const ctx = { resolvedCli: this._resolvedCli[agent.id] };
+      tasks.push(
+        discoverModelsFor(agent.id, ctx)
+          .then((discovered) => {
+            if (discovered && discovered.length > 0) {
+              this._modelCache[agent.id] = discovered;
+              status[agent.id] = 'updated';
+              console.log(`[LGTM] ${agent.name}: discovered ${discovered.length} models`);
+            } else {
+              status[agent.id] = 'fallback';
+              console.log(`[LGTM] ${agent.name}: discovery returned nothing, using hardcoded list`);
+            }
+          })
+          .catch((err) => {
+            status[agent.id] = 'fallback';
+            console.warn(`[LGTM] ${agent.name}: discovery threw — ${err.message}`);
+          }),
+      );
+    }
+    await Promise.all(tasks);
+    return status;
   }
 
   /**

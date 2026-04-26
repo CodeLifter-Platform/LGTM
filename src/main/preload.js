@@ -35,6 +35,7 @@ contextBridge.exposeInMainWorld('lgtm', {
   // Agents
   getAgents: () => ipcRenderer.invoke('get-agents'),
   refreshAgents: () => ipcRenderer.invoke('refresh-agents'),
+  onAgentsUpdated: (cb) => ipcRenderer.on('agents-updated', (_e, agents) => cb(agents)),
 
   // Settings
   getSettings: () => ipcRenderer.invoke('get-settings'),

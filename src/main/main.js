@@ -100,6 +100,18 @@ app.whenReady().then(async () => {
   createWindow();
   initAutoUpdater();
 
+  // Kick off background model discovery — non-blocking. UI shows the
+  // hardcoded fallback list immediately, then refreshes when this
+  // resolves. This is how Opus 4.7 (or whatever ships next week)
+  // appears without a code change.
+  agentRegistry.refreshModels()
+    .then(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('agents-updated', serializeAgents(agentRegistry.getAll()));
+      }
+    })
+    .catch((err) => console.warn('[LGTM] Background model discovery failed:', err.message));
+
   const existingPat = await patStore.get();
   const orgUrl = config.get('orgUrl');
   if (existingPat && orgUrl) {
@@ -242,25 +254,59 @@ function handleWebhookEvent(event) {
 
 // ── IPC: Authentication ──────────────────────────────────────────────
 
+/**
+ * Race a promise against a timeout. Used to guarantee the PAT-validation
+ * IPC always returns to the renderer in bounded time, even if the
+ * underlying SDK call hangs (DevOps slow path, DNS issue, keychain
+ * prompt firing invisibly behind LGTM).
+ */
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error(`${label} timed out after ${ms}ms`)),
+      ms,
+    )),
+  ]);
+}
+
 ipcMain.handle('validate-pat', async (_event, { pat, orgUrl }) => {
   try {
     const client = new DevOpsClient(pat, orgUrl);
     const parsed = DevOpsClient.parseOrgUrl(orgUrl);
     console.log(`[LGTM] Connecting to org: ${parsed.orgUrl}${parsed.project ? ` (project filter: ${parsed.project})` : ''}`);
 
-    const projects = await client.getProjects();
-    if (projects && projects.length > 0) {
-      await patStore.set(pat);
-      config.set('orgUrl', orgUrl);
-      currentPat = pat;
-      agentRunner.setCredentials(pat, parsed.orgUrl);
-      await initDevOps(pat, orgUrl);
-
-      const projectNames = projects.map((p) => p.name);
-      const filterNote = parsed.project ? ` Filtered to project "${parsed.project}".` : '';
-      return { success: true, projects: projectNames, filterNote };
+    // The ONLY thing we await is the call that proves the PAT actually
+    // works against this org. Everything else (keychain persistence,
+    // getMe(), webhook server, PR poll) runs in the background after
+    // we return — the renderer hooks events for whatever it needs.
+    const projects = await withTimeout(client.getProjects(), 20000, 'getProjects');
+    if (!projects || projects.length === 0) {
+      return { success: false, error: 'PAT valid but no projects found.' };
     }
-    return { success: false, error: 'PAT valid but no projects found.' };
+
+    // In-memory state is set synchronously so subsequent IPC calls
+    // (loadAgents, getSettings, refresh-prs) work immediately.
+    config.set('orgUrl', orgUrl);
+    currentPat = pat;
+    agentRunner.setCredentials(pat, parsed.orgUrl);
+
+    // Persist the PAT and finish wiring up DevOps in the background.
+    // electron-store writes to disk synchronously, so even if keytar
+    // hangs on a hidden keychain prompt the fallback store still has
+    // the PAT for next launch.
+    patStore.set(pat).catch((err) => {
+      console.warn('[LGTM] PAT persistence failed (in-memory still works):', err.message);
+    });
+    initDevOps(pat, orgUrl).catch((err) => {
+      console.warn('[LGTM] initDevOps error (background):', err.message);
+    });
+
+    return {
+      success: true,
+      projects: projects.map((p) => p.name),
+      filterNote: parsed.project ? ` Filtered to project "${parsed.project}".` : '',
+    };
   } catch (err) {
     const status = err.response?.status;
     const parsed = DevOpsClient.parseOrgUrl(orgUrl);
@@ -399,8 +445,11 @@ function serializeAgents(agentList) {
 
 ipcMain.handle('get-agents', () => serializeAgents(agentRegistry.getAll()));
 
-ipcMain.handle('refresh-agents', () => {
+ipcMain.handle('refresh-agents', async () => {
   agentRegistry.refresh();
+  // User-triggered refresh from settings — wait for discovery so the
+  // returned list reflects what the dropdown will show.
+  await agentRegistry.refreshModels();
   return serializeAgents(agentRegistry.getAll());
 });
 
