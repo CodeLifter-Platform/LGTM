@@ -9,7 +9,7 @@
  *   5. Clean up the temp clone when done
  */
 
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const { BrowserWindow } = require('electron');
 const fs = require('fs');
 const os = require('os');
@@ -18,14 +18,60 @@ const { AgentRegistry } = require('./agent-registry');
 const { RepoCloner } = require('./repo-cloner');
 const { PromptResolver } = require('./prompt-resolver');
 const { DevOpsClient } = require('./devops-client');
+const { ScenarioPrompts } = require('./scenario-prompts');
+
+function formatIdentity(user) {
+  if (!user) return '';
+  const name = user.displayName || user.email || '';
+  const id = user.id || '';
+  if (name && id) return `${name} (${id})`;
+  return name || id || '';
+}
+
+/**
+ * Strip Node-debugger env vars before spawning child agents. Electron's
+ * dev mode (and `electron --inspect`) inject NODE_OPTIONS=--inspect and
+ * friends, which then leak into any node-shebang CLI we spawn (e.g.
+ * auggie), making it print "Debugger listening on ws://..." and attach
+ * a debugger to itself. Harmless but noisy in the detail panel.
+ */
+function buildSpawnEnv() {
+  const env = { ...process.env };
+  delete env.NODE_OPTIONS;
+  delete env.ELECTRON_RUN_AS_NODE;
+  delete env.NODE_INSPECT;
+  delete env.NODE_INSPECT_RESUME_ON_START;
+  return env;
+}
+
+function detectDefaultBranch(clonePath) {
+  try {
+    const out = execSync('git symbolic-ref --short refs/remotes/origin/HEAD', {
+      cwd: clonePath, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return out.replace(/^origin\//, '');
+  } catch {
+    try {
+      const out = execSync('git remote show origin', {
+        cwd: clonePath, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const m = out.match(/HEAD branch:\s*(\S+)/);
+      if (m) return m[1];
+    } catch { /* ignore */ }
+    return 'main';
+  }
+}
 
 class AgentRunner {
   constructor(config) {
     this.config = config;
     this.registry = new AgentRegistry();
     this.promptResolver = new PromptResolver(config);
+    this.scenarioPrompts = new ScenarioPrompts();
+    this.scenarioPrompts.loadAll(); // fail fast at startup if files missing
     this.cloner = null;       // initialised once we have a PAT
     this.devopsClient = null;  // for fetching existing threads
+    this.currentUser = null;   // set after auth — used for REVIEWER_/AUTHOR_IDENTITY
     this.activeReviews = new Map(); // key → review object
   }
 
@@ -35,6 +81,107 @@ class AgentRunner {
   setCredentials(pat, orgUrl) {
     this.cloner = new RepoCloner(pat, orgUrl);
     this.devopsClient = new DevOpsClient(pat, orgUrl);
+  }
+
+  /**
+   * Set the authenticated ADO user. Used to populate REVIEWER_IDENTITY and
+   * AUTHOR_IDENTITY in dispatched scenario prompts.
+   */
+  setIdentity(user) {
+    this.currentUser = user || null;
+  }
+
+  /**
+   * Update review.status and append a timeline entry. The renderer reads
+   * `timeline` to draw the cloning → running → completed pill row.
+   */
+  _setStatus(review, status) {
+    if (review.status === status) return;
+    review.status = status;
+    review.timeline = review.timeline || [];
+    review.timeline.push({ status, at: Date.now() });
+  }
+
+  /**
+   * Append a diagnostic line to the agent output (and stream it to the
+   * renderer) so the user can see what the orchestrator is doing — what
+   * we spawned, when the process exited, etc. These show up alongside
+   * the agent's real stdout in the detail panel.
+   */
+  _pushDiag(key, review, line) {
+    const formatted = (line.endsWith('\n') ? line : line + '\n');
+    review.output += formatted;
+    this._notifyRendererChunk(key, formatted, review);
+  }
+
+  /**
+   * Two-stage watchdog:
+   *
+   *   1. First-output watchdog — fires once after `firstOutputMs` if the
+   *      agent hasn't emitted anything yet. Points at the most common
+   *      causes (auth / API key / warmup).
+   *
+   *   2. Ongoing-silence watchdog — fires every `ongoingSilenceMs` of no
+   *      new output, even after the agent has produced something. Tells
+   *      the user the run isn't dead (the orchestrator is still alive)
+   *      and reminds them they can hit the Cancel button if they're done
+   *      waiting. Re-arms after each fire so a long-stuck run keeps
+   *      nudging.
+   *
+   * Callers must call `onOutput()` on every chunk and `cancel()` when the
+   * process exits.
+   */
+  _armSilenceWatchdog(
+    key, review, agentId,
+    firstOutputMs = 60000,
+    ongoingSilenceMs = 150000,  // 2.5 min
+  ) {
+    let firedFirstOutput = false;
+    let lastOutputAt = Date.now();
+    let lastNudgeAt = Date.now();
+
+    const initialTimer = setTimeout(() => {
+      if (firedFirstOutput) return;
+      if (review.status !== 'running') return;
+      this._pushDiag(key, review,
+        `[LGTM] No output from ${agentId} after ${Math.round(firstOutputMs / 1000)}s. ` +
+        `Common causes: the CLI needs first-time auth (try running it once in a terminal), ` +
+        `a required API key env var is missing, or the agent is still warming up.`
+      );
+    }, firstOutputMs);
+
+    // Poll every 30s; we fire the nudge ourselves when enough time has
+    // elapsed since either the last output OR the last nudge. (A naive
+    // setInterval(ongoingSilenceMs) would fire even right after a chunk
+    // arrived if the chunk landed at the wrong moment.)
+    const ongoingTimer = setInterval(() => {
+      if (review.status !== 'running') return;
+      const now = Date.now();
+      const silenceFor = now - lastOutputAt;
+      const sinceLastNudge = now - lastNudgeAt;
+      if (silenceFor >= ongoingSilenceMs && sinceLastNudge >= ongoingSilenceMs) {
+        const mins = Math.round(silenceFor / 60000);
+        this._pushDiag(key, review,
+          `[LGTM] Still waiting on ${agentId} — no output for ~${mins} min. ` +
+          `Press Cancel above if you want to abort, otherwise the run will continue.`
+        );
+        lastNudgeAt = now;
+      }
+    }, 30000);
+
+    return {
+      onOutput: () => {
+        lastOutputAt = Date.now();
+        if (!firedFirstOutput) {
+          firedFirstOutput = true;
+          clearTimeout(initialTimer);
+        }
+      },
+      cancel: () => {
+        clearTimeout(initialTimer);
+        clearInterval(ongoingTimer);
+      },
+    };
   }
 
   /**
@@ -58,6 +205,7 @@ class AgentRunner {
     if (!agent.available) return { success: false, error: `${agent.name} is not installed.` };
 
     // Create review record immediately so UI shows "cloning" state
+    const now = Date.now();
     const review = {
       pr,
       agentId,
@@ -65,9 +213,12 @@ class AgentRunner {
       mode,
       status: 'cloning',
       output: '',
-      startedAt: Date.now(),
+      prompt: '',
+      timeline: [{ status: 'cloning', at: now }],
+      startedAt: now,
       cleanup: null,
       child: null,
+      cloneChild: null,
       cancelled: false,
     };
     this.activeReviews.set(key, review);
@@ -79,13 +230,20 @@ class AgentRunner {
         throw new Error('Not authenticated — no PAT available for cloning.');
       }
 
-      const { clonePath, cleanup } = await this.cloner.clone(pr);
+      const onCloneChild = (c) => {
+        review.cloneChild = c;
+        if (review.cancelled && c && !c.killed) {
+          try { c.kill('SIGTERM'); } catch { /* ignore */ }
+        }
+      };
+      const { clonePath, cleanup } = await this.cloner.clone(pr, { onChild: onCloneChild });
+      review.cloneChild = null;
       review.cleanup = cleanup;
       review.clonePath = clonePath;
 
       // If cancelled while cloning, abort before spawning the agent.
       if (review.cancelled) {
-        review.status = 'cancelled';
+        this._setStatus(review, 'cancelled');
         review.finishedAt = Date.now();
         this._notifyRenderer(key, review);
         if (review.cleanup) review.cleanup();
@@ -153,69 +311,49 @@ class AgentRunner {
       const sourceBranch = pr.sourceBranch.replace('refs/heads/', '');
       const targetBranch = pr.targetBranch.replace('refs/heads/', '');
 
-      let promptParts;
-      if (mode === 'resolve') {
-        promptParts = [
-          `You are addressing review comments on PR #${pr.id} "${pr.title}" in the Azure DevOps repo "${pr.repo}" (project "${pr.project}").`,
-          `The PR's source branch "${sourceBranch}" is checked out as your working directory; it is being merged into "${targetBranch}".`,
-          `Run \`git diff ${targetBranch}...${sourceBranch}\` to see the PR's changes.`,
-          `Your job is to make code changes that resolve the valuable existing review threads, then push them back so reviewers see the updates.`,
-          ``,
-          `## Workflow`,
-          `1. Read the existing review threads (listed below).`,
-          `2. For each thread, decide if it warrants a code change. SKIP threads that are already Fixed/Closed/ByDesign, or that are subjective preferences without strong reasoning.`,
-          `3. For threads that warrant action: investigate the relevant code, make the change, and commit with a descriptive message like "Address review: <summary>".`,
-          `4. Before pushing, run: git pull --rebase origin "${sourceBranch}"  (in case the branch advanced).`,
-          `5. Push: git push origin "${sourceBranch}".  The PAT is embedded in the remote URL so no auth prompt is needed.`,
-          `6. Optionally post a brief reply to each addressed thread saying what you did.`,
-          ``,
-          `If there are no valuable threads to address, exit without making any commits or pushing — just report that there is nothing actionable.`,
-          ``,
-          `PR URL: ${pr.webUrl}`,
-        ];
-        if (universalPrompt) {
-          promptParts.push('\n--- LGTM RULES (for context — these inform what counts as "valuable") ---\n');
-          promptParts.push(universalPrompt);
-        }
-        if (repoPrompt) {
-          promptParts.push('\n--- PROJECT-SPECIFIC RULES ---\n');
-          promptParts.push(repoPrompt);
-        }
-        if (existingThreadsSummary) {
-          promptParts.push(existingThreadsSummary);
-        } else {
-          promptParts.push('\n## Existing Review Threads\n\n(No review threads found. There is nothing to resolve — exit without making changes.)');
-        }
+      const scenarioId = mode === 'resolve' ? 'resolve-comments' : 'pr-review';
+      review.scenarioId = scenarioId;
+
+      const identity = formatIdentity(this.currentUser);
+      const contextVars = {
+        PR_ID: pr.id,
+        PR_URL: pr.webUrl,
+        REPO_PATH: clonePath,
+        SOURCE_BRANCH: sourceBranch,
+        TARGET_BRANCH: targetBranch,
+      };
+      if (scenarioId === 'pr-review') {
+        contextVars.REVIEWER_IDENTITY = identity || 'unknown';
       } else {
-        promptParts = [
-          `You are reviewing PR #${pr.id} "${pr.title}" in the Azure DevOps repo "${pr.repo}" (project "${pr.project}").`,
-          `The branch "${sourceBranch}" is being merged into "${targetBranch}".`,
-          `You have the full codebase available in your working directory.`,
-          `Run \`git diff ${targetBranch}...${sourceBranch}\` to see what changed.`,
-          `Review the diff in the context of the full codebase.`,
-          `Post your review comments directly as threads in the Azure DevOps PR.`,
-          `The PR URL is: ${pr.webUrl}`,
-        ];
-
-        if (universalPrompt) {
-          promptParts.push('\n--- LGTM REVIEW RULES ---\n');
-          promptParts.push(universalPrompt);
-        }
-
-        if (repoPrompt) {
-          promptParts.push('\n--- PROJECT-SPECIFIC RULES ---\n');
-          promptParts.push(repoPrompt);
-        }
-
-        if (existingThreadsSummary) {
-          promptParts.push(existingThreadsSummary);
-        }
+        contextVars.AUTHOR_IDENTITY = identity || 'unknown';
       }
 
-      const prompt = promptParts.join('\n');
+      const extraSections = [];
+      if (universalPrompt) {
+        extraSections.push({ title: 'LGTM Project Rules', body: universalPrompt });
+      }
+      if (repoPrompt) {
+        extraSections.push({ title: 'Project-Specific Rules', body: repoPrompt });
+      }
+      if (existingThreadsSummary) {
+        extraSections.push({
+          title: 'Pre-fetched Existing Review Threads',
+          body: existingThreadsSummary.replace(/^\n## Existing Review Threads\n\n[^\n]*\n\n/, ''),
+        });
+      } else if (scenarioId === 'resolve-comments') {
+        extraSections.push({
+          title: 'Pre-fetched Existing Review Threads',
+          body: '(No review threads pre-fetched. If the SDK confirms there are none, exit without making changes.)',
+        });
+      }
+
+      const prompt = this.scenarioPrompts.buildDispatchPrompt(
+        agentId, scenarioId, contextVars, extraSections,
+      );
+      review.prompt = prompt;
 
       // ── Step 3: Spawn the agent ────────────────────────────
-      review.status = 'running';
+      this._setStatus(review, 'running');
       this._notifyRenderer(key, review);
 
       const { command, args, stdinPrompt } = this.registry.buildCommand(agentId, prompt, model);
@@ -223,6 +361,15 @@ class AgentRunner {
       console.log(`[LGTM] Launching ${agentId} in ${clonePath}`);
       console.log(`[LGTM]   Command: ${command} ${args.join(' ')}`);
       console.log(`[LGTM]   Prompt length: ${prompt.length} chars, stdin: ${!!stdinPrompt}`);
+
+      // Surface the same info to the user in the detail panel so a
+      // silently-hung agent isn't a black box.
+      this._pushDiag(key, review,
+        `[LGTM] Launching ${agentId} (model: ${model || 'default'}) in ${clonePath}`);
+      this._pushDiag(key, review,
+        `[LGTM]   $ ${command} ${args.join(' ')}`);
+      this._pushDiag(key, review,
+        `[LGTM]   prompt: ${prompt.length.toLocaleString()} chars via ${stdinPrompt ? 'stdin' : 'argv'}`);
 
       // Write prompt to a temp file so we can pipe it via stdin.
       // This avoids shell escaping issues with large prompts containing
@@ -234,7 +381,7 @@ class AgentRunner {
         cwd: clonePath,
         stdio: [stdinPrompt ? 'pipe' : 'ignore', 'pipe', 'pipe'],
         shell: false,
-        env: { ...process.env },
+        env: buildSpawnEnv(),
       });
       review.child = child;
 
@@ -246,30 +393,45 @@ class AgentRunner {
           // Clean up temp file after it's been read
           try { fs.unlinkSync(promptFile); } catch { /* ignore */ }
         });
+        child.stdin.on('error', (err) => {
+          // EPIPE is expected if the agent dies before reading the prompt.
+          if (err && err.code !== 'EPIPE') {
+            this._pushDiag(key, review, `[LGTM] stdin error: ${err.message}`);
+          }
+        });
       } else {
         try { fs.unlinkSync(promptFile); } catch { /* ignore */ }
       }
 
+      const watchdog = this._armSilenceWatchdog(key, review, agentId);
+
       // ── Step 4: Stream output ──────────────────────────────
       child.stdout.on('data', (data) => {
+        watchdog.onOutput();
         const chunk = data.toString();
         review.output += chunk;
         this._notifyRendererChunk(key, chunk, review);
       });
 
       child.stderr.on('data', (data) => {
+        watchdog.onOutput();
         const chunk = data.toString();
         review.output += chunk;
         this._notifyRendererChunk(key, chunk, review);
       });
 
-      child.on('close', (code) => {
+      child.on('close', (code, signal) => {
+        watchdog.cancel();
+        const reason = signal ? `signal ${signal}` : `exit code ${code}`;
+        this._pushDiag(key, review, `[LGTM] ${agentId} finished — ${reason}`);
+
         if (review.cancelled) {
-          review.status = 'cancelled';
+          this._setStatus(review, 'cancelled');
         } else {
-          review.status = code === 0 ? 'completed' : 'failed';
+          this._setStatus(review, code === 0 ? 'completed' : 'failed');
         }
         review.finishedAt = Date.now();
+        this._extractAndAttachReport(review);
         this._notifyRenderer(key, review);
         console.log(`[LGTM] Review ${key} finished with code ${code}${review.cancelled ? ' (cancelled)' : ''}`);
 
@@ -283,8 +445,11 @@ class AgentRunner {
       });
 
       child.on('error', (err) => {
-        review.status = 'failed';
-        review.output += `\nProcess error: ${err.message}`;
+        watchdog.cancel();
+        this._pushDiag(key, review,
+          `[LGTM] Failed to spawn ${agentId}: ${err.message}` +
+          (err.code === 'ENOENT' ? ` (is "${command}" on your PATH?)` : ''));
+        this._setStatus(review, 'failed');
         review.finishedAt = Date.now();
         this._notifyRenderer(key, review);
         if (review.cleanup) review.cleanup();
@@ -293,12 +458,12 @@ class AgentRunner {
       return { success: true };
 
     } catch (err) {
-      review.status = 'failed';
-      review.output += `\nError: ${err.message}`;
+      this._setStatus(review, review.cancelled ? 'cancelled' : 'failed');
+      if (!review.cancelled) review.output += `\nError: ${err.message}`;
       review.finishedAt = Date.now();
       this._notifyRenderer(key, review);
       if (review.cleanup) review.cleanup();
-      return { success: false, error: err.message };
+      return { success: !!review.cancelled, error: review.cancelled ? null : err.message, cancelled: !!review.cancelled };
     }
   }
 
@@ -323,16 +488,21 @@ class AgentRunner {
     if (!agent) return { success: false, error: `Unknown agent: ${agentId}` };
     if (!agent.available) return { success: false, error: `${agent.name} is not installed.` };
 
+    const now = Date.now();
     const review = {
       workItem,
       repoInfo,
       agentId,
       model,
+      options,
       status: 'cloning',
       output: '',
-      startedAt: Date.now(),
+      prompt: '',
+      timeline: [{ status: 'cloning', at: now }],
+      startedAt: now,
       cleanup: null,
       child: null,
+      cloneChild: null,
       cancelled: false,
       // Shape a minimal pr-like object so the detail panel can render it.
       pr: {
@@ -353,16 +523,24 @@ class AgentRunner {
         throw new Error('Not authenticated — no PAT available for cloning.');
       }
 
+      const onCloneChild = (c) => {
+        review.cloneChild = c;
+        if (review.cancelled && c && !c.killed) {
+          try { c.kill('SIGTERM'); } catch { /* ignore */ }
+        }
+      };
       const { clonePath, cleanup } = await this.cloner.cloneRepo(
         repoInfo.project,
         repoInfo.repo,
         workItem.id,
+        { onChild: onCloneChild },
       );
+      review.cloneChild = null;
       review.cleanup = cleanup;
       review.clonePath = clonePath;
 
       if (review.cancelled) {
-        review.status = 'cancelled';
+        this._setStatus(review, 'cancelled');
         review.finishedAt = Date.now();
         this._notifyRenderer(key, review);
         if (review.cleanup) review.cleanup();
@@ -379,14 +557,33 @@ class AgentRunner {
         console.warn(`[LGTM] Could not fetch work item details: ${err.message}`);
       }
 
-      let prompt = this._buildWorkItemPrompt(details, repoInfo);
+      const scenarioId = 'implement-ticket';
+      review.scenarioId = scenarioId;
+
+      const defaultBranch = detectDefaultBranch(clonePath);
+      const identity = formatIdentity(this.currentUser);
+      const contextVars = {
+        WORK_ITEM_ID: details.id || workItem.id,
+        WORK_ITEM_URL: details.webUrl || workItem.webUrl,
+        WORK_ITEM_TYPE: details.type || workItem.type || 'WorkItem',
+        REPO_PATH: clonePath,
+        DEFAULT_BRANCH: defaultBranch,
+        AUTHOR_IDENTITY: identity || 'unknown',
+      };
+
+      const extraSections = [
+        { title: 'Pre-fetched Work Item Details', body: this._renderWorkItemDetails(details, repoInfo) },
+      ];
 
       // Append repo-specific prompt file if configured.
       if (options.promptFile) {
         const repoPromptPath = path.join(clonePath, options.promptFile);
         try {
           const repoPrompt = fs.readFileSync(repoPromptPath, 'utf8');
-          prompt += `\n\n--- REPO PROMPT (${options.promptFile}) ---\n\n${repoPrompt}`;
+          extraSections.push({
+            title: `Repo Prompt (${options.promptFile})`,
+            body: repoPrompt,
+          });
           review.promptSource = `repo:${options.promptFile}`;
           console.log(`[LGTM] Appended repo prompt from ${options.promptFile}`);
         } catch (err) {
@@ -394,13 +591,25 @@ class AgentRunner {
         }
       }
 
-      review.status = 'running';
+      const prompt = this.scenarioPrompts.buildDispatchPrompt(
+        agentId, scenarioId, contextVars, extraSections,
+      );
+      review.prompt = prompt;
+
+      this._setStatus(review, 'running');
       this._notifyRenderer(key, review);
 
       const { command, args, stdinPrompt } = this.registry.buildCommand(agentId, prompt, model);
 
       console.log(`[LGTM] Launching ${agentId} in ${clonePath} for work item #${workItem.id}`);
       console.log(`[LGTM]   Command: ${command} ${args.join(' ')}`);
+
+      this._pushDiag(key, review,
+        `[LGTM] Launching ${agentId} (model: ${model || 'default'}) in ${clonePath}`);
+      this._pushDiag(key, review,
+        `[LGTM]   $ ${command} ${args.join(' ')}`);
+      this._pushDiag(key, review,
+        `[LGTM]   prompt: ${prompt.length.toLocaleString()} chars via ${stdinPrompt ? 'stdin' : 'argv'}`);
 
       const promptFile = path.join(os.tmpdir(), `lgtm-wi-prompt-${Date.now()}.txt`);
       fs.writeFileSync(promptFile, prompt, 'utf8');
@@ -409,7 +618,7 @@ class AgentRunner {
         cwd: clonePath,
         stdio: [stdinPrompt ? 'pipe' : 'ignore', 'pipe', 'pipe'],
         shell: false,
-        env: { ...process.env },
+        env: buildSpawnEnv(),
       });
       review.child = child;
 
@@ -419,28 +628,42 @@ class AgentRunner {
         promptStream.on('end', () => {
           try { fs.unlinkSync(promptFile); } catch { /* ignore */ }
         });
+        child.stdin.on('error', (err) => {
+          if (err && err.code !== 'EPIPE') {
+            this._pushDiag(key, review, `[LGTM] stdin error: ${err.message}`);
+          }
+        });
       } else {
         try { fs.unlinkSync(promptFile); } catch { /* ignore */ }
       }
 
+      const watchdog = this._armSilenceWatchdog(key, review, agentId);
+
       child.stdout.on('data', (data) => {
+        watchdog.onOutput();
         const chunk = data.toString();
         review.output += chunk;
         this._notifyRendererChunk(key, chunk, review);
       });
       child.stderr.on('data', (data) => {
+        watchdog.onOutput();
         const chunk = data.toString();
         review.output += chunk;
         this._notifyRendererChunk(key, chunk, review);
       });
 
-      child.on('close', (code) => {
+      child.on('close', (code, signal) => {
+        watchdog.cancel();
+        const reason = signal ? `signal ${signal}` : `exit code ${code}`;
+        this._pushDiag(key, review, `[LGTM] ${agentId} finished — ${reason}`);
+
         if (review.cancelled) {
-          review.status = 'cancelled';
+          this._setStatus(review, 'cancelled');
         } else {
-          review.status = code === 0 ? 'completed' : 'failed';
+          this._setStatus(review, code === 0 ? 'completed' : 'failed');
         }
         review.finishedAt = Date.now();
+        this._extractAndAttachReport(review);
         this._notifyRenderer(key, review);
         console.log(`[LGTM] Work item action ${key} finished with code ${code}${review.cancelled ? ' (cancelled)' : ''}`);
 
@@ -451,8 +674,11 @@ class AgentRunner {
       });
 
       child.on('error', (err) => {
-        review.status = 'failed';
-        review.output += `\nProcess error: ${err.message}`;
+        watchdog.cancel();
+        this._pushDiag(key, review,
+          `[LGTM] Failed to spawn ${agentId}: ${err.message}` +
+          (err.code === 'ENOENT' ? ` (is "${command}" on your PATH?)` : ''));
+        this._setStatus(review, 'failed');
         review.finishedAt = Date.now();
         this._notifyRenderer(key, review);
         if (review.cleanup) review.cleanup();
@@ -460,16 +686,40 @@ class AgentRunner {
 
       return { success: true };
     } catch (err) {
-      review.status = 'failed';
-      review.output += `\nError: ${err.message}`;
+      this._setStatus(review, review.cancelled ? 'cancelled' : 'failed');
+      if (!review.cancelled) review.output += `\nError: ${err.message}`;
       review.finishedAt = Date.now();
       this._notifyRenderer(key, review);
       if (review.cleanup) review.cleanup();
-      return { success: false, error: err.message };
+      return { success: !!review.cancelled, error: review.cancelled ? null : err.message, cancelled: !!review.cancelled };
     }
   }
 
-  _buildWorkItemPrompt(details, repoInfo) {
+  /**
+   * After a sub-agent exits, locate the final JSON report in its stdout,
+   * validate it against the dispatched scenario's schema, and attach it
+   * to the review record. On parse failure, mark the run as
+   * `report_unparseable` but do not change the run status — the raw log
+   * stays on `review.output` so the user can still inspect it.
+   */
+  _extractAndAttachReport(review) {
+    if (!review.scenarioId) return; // older flows without a scenario
+    if (review.cancelled || review.status === 'cancelled') return;
+
+    const result = this.scenarioPrompts.parseFinalReport(review.scenarioId, review.output);
+    if (result.ok) {
+      review.report = result.report;
+      review.reportStatus = 'parsed';
+      console.log(`[LGTM] Parsed final report for scenario ${review.scenarioId}`);
+    } else {
+      review.report = null;
+      review.reportStatus = 'report_unparseable';
+      review.reportError = result.error;
+      console.warn(`[LGTM] Could not parse final report (${review.scenarioId}): ${result.error}`);
+    }
+  }
+
+  _renderWorkItemDetails(details, repoInfo) {
     const stripHtml = (html) => (html || '')
       .replace(/<br\s*\/?>/gi, '\n')
       .replace(/<\/p>/gi, '\n\n')
@@ -483,35 +733,28 @@ class AgentRunner {
       .trim();
 
     const parts = [
-      `You are working on ${details.type || 'work item'} #${details.id} "${details.title}" from Azure DevOps project "${details.project || repoInfo.project}".`,
-      `The repo "${repoInfo.repo}" has been cloned as your working directory on its default branch.`,
-      `Investigate the codebase, plan a fix or implementation, and make the necessary changes.`,
-      '',
-      `## Work Item`,
-      `- ID: ${details.id}`,
-      `- Type: ${details.type || ''}`,
-      `- Title: ${details.title || ''}`,
-      `- State: ${details.state || ''}`,
+      `Project: ${details.project || repoInfo.project}`,
+      `Repo: ${repoInfo.repo}`,
+      `ID: ${details.id}`,
+      `Type: ${details.type || ''}`,
+      `Title: ${details.title || ''}`,
+      `State: ${details.state || ''}`,
     ];
-    if (details.priority != null) parts.push(`- Priority: ${details.priority}`);
-    if (details.severity) parts.push(`- Severity: ${details.severity}`);
-    if (details.tags) parts.push(`- Tags: ${details.tags}`);
+    if (details.priority != null) parts.push(`Priority: ${details.priority}`);
+    if (details.severity) parts.push(`Severity: ${details.severity}`);
+    if (details.tags) parts.push(`Tags: ${details.tags}`);
 
     const desc = stripHtml(details.description);
-    if (desc) parts.push('', '## Description', desc);
+    if (desc) parts.push('', '### Description', desc);
 
     const repro = stripHtml(details.reproSteps);
-    if (repro) parts.push('', '## Repro Steps', repro);
+    if (repro) parts.push('', '### Repro Steps', repro);
 
     const sysInfo = stripHtml(details.systemInfo);
-    if (sysInfo) parts.push('', '## System Info', sysInfo);
+    if (sysInfo) parts.push('', '### System Info', sysInfo);
 
     const ac = stripHtml(details.acceptanceCriteria);
-    if (ac) parts.push('', '## Acceptance Criteria', ac);
-
-    parts.push('', '---', '',
-      `When you\'re done, create a new branch, commit your changes, and summarize what you did.`,
-      `Do NOT push or open a PR — leave that to the user to review locally.`);
+    if (ac) parts.push('', '### Acceptance Criteria', ac);
 
     return parts.join('\n');
   }
@@ -519,7 +762,8 @@ class AgentRunner {
   /**
    * Cancel an in-progress review. If the agent child process is running,
    * it is sent SIGTERM, then SIGKILL if it doesn't exit within 2s. If the
-   * review is still cloning, the cancel flag aborts the spawn.
+   * review is still cloning, kill the active git child so the clone aborts
+   * immediately rather than running to completion.
    */
   cancelReview(key) {
     const review = this.activeReviews.get(key);
@@ -541,9 +785,20 @@ class AgentRunner {
       }, 2000);
     }
 
-    // If still cloning, proactively mark cancelled so the UI updates now.
-    // The cloning branch in startReview will bail out and trigger cleanup
-    // once the clone finishes.
+    // Kill the in-flight git clone if we're still cloning. The cloner sets
+    // review.cloneChild for each git invocation it spawns; killing it makes
+    // _runGit reject, the catch in startReview/startWorkItemAction triggers
+    // cleanup, and the run lands in a cancelled state immediately.
+    const cloneChild = review.cloneChild;
+    if (cloneChild && cloneChild.exitCode === null && !cloneChild.killed) {
+      try { cloneChild.kill('SIGTERM'); } catch { /* ignore */ }
+      setTimeout(() => {
+        if (cloneChild.exitCode === null && !cloneChild.killed) {
+          try { cloneChild.kill('SIGKILL'); } catch { /* ignore */ }
+        }
+      }, 2000);
+    }
+
     if (review.status === 'cloning') {
       this._notifyRenderer(key, review);
     }
@@ -561,8 +816,15 @@ class AgentRunner {
         status: review.status,
         agentId: review.agentId,
         model: review.model || null,
+        mode: review.mode || null,
         pr: review.pr,
         promptSource: review.promptSource || null,
+        scenarioId: review.scenarioId || null,
+        report: review.report || null,
+        reportStatus: review.reportStatus || null,
+        reportError: review.reportError || null,
+        timeline: review.timeline || [],
+        clonePath: review.clonePath || null,
         startedAt: review.startedAt,
         finishedAt: review.finishedAt || null,
         outputLength: (review.output || '').length,
@@ -580,6 +842,65 @@ class AgentRunner {
   }
 
   /**
+   * Full snapshot for the detail view: prompt, timeline, clone path, etc.
+   * Returns null if no review is found.
+   */
+  getReviewDetail(key) {
+    const review = this.activeReviews.get(key);
+    if (!review) return null;
+    return {
+      key,
+      status: review.status,
+      agentId: review.agentId,
+      model: review.model || null,
+      mode: review.mode || null,
+      pr: review.pr,
+      workItem: review.workItem || null,
+      repoInfo: review.repoInfo || null,
+      scenarioId: review.scenarioId || null,
+      promptSource: review.promptSource || null,
+      prompt: review.prompt || '',
+      timeline: review.timeline || [],
+      report: review.report || null,
+      reportStatus: review.reportStatus || null,
+      reportError: review.reportError || null,
+      clonePath: review.clonePath || null,
+      output: review.output || '',
+      startedAt: review.startedAt,
+      finishedAt: review.finishedAt || null,
+      cancelled: !!review.cancelled,
+    };
+  }
+
+  /**
+   * Re-dispatch a previously-run review with the same target. Optionally
+   * override the agent and/or model. Used by the detail view's "Re-run"
+   * button.
+   */
+  async rerunReview(key, overrides = {}) {
+    const prev = this.activeReviews.get(key);
+    if (!prev) return { success: false, error: 'No review found for that key.' };
+    if (prev.status === 'cloning' || prev.status === 'running') {
+      return { success: false, error: 'Cannot re-run while the previous run is still in progress.' };
+    }
+
+    const agentId = overrides.agentId || prev.agentId;
+    const model = overrides.model !== undefined ? overrides.model : prev.model;
+
+    if (prev.workItem) {
+      // Work-item dispatch (scenario 3).
+      return this.startWorkItemAction(
+        prev.workItem,
+        prev.repoInfo,
+        agentId,
+        model,
+        { promptFile: (prev.options && prev.options.promptFile) || undefined },
+      );
+    }
+    return this.startReview(prev.pr, agentId, model, prev.mode || 'review');
+  }
+
+  /**
    * Push a status update to the renderer.
    */
   _notifyRenderer(key, review) {
@@ -589,8 +910,15 @@ class AgentRunner {
         key,
         status: review.status,
         agentId: review.agentId,
+        mode: review.mode || null,
         pr: review.pr,
         promptSource: review.promptSource || null,
+        scenarioId: review.scenarioId || null,
+        report: review.report || null,
+        reportStatus: review.reportStatus || null,
+        reportError: review.reportError || null,
+        timeline: review.timeline || [],
+        clonePath: review.clonePath || null,
         startedAt: review.startedAt,
         finishedAt: review.finishedAt || null,
       });

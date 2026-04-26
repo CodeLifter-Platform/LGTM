@@ -2,7 +2,19 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <!-- Required for Bun-compiled child binaries (e.g. the `claude` CLI)
+       which use JIT codegen at runtime. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
   <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <!-- Allows spawning child processes (node, agent CLIs) that may load
+       dylibs not signed by the same team identifier. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <!-- Allow setting environment variables we forward to child processes
+       (PATH, NODE_OPTIONS, etc.) on hardened-runtime builds. -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
   <true/>
   <key>com.apple.security.network.client</key>
   <true/>

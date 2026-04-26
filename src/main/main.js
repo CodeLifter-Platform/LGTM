@@ -209,9 +209,11 @@ async function initDevOps(pat, orgUrl) {
     currentUser = await devopsClient.getMe();
     console.log(`[LGTM] Authenticated as: ${currentUser.displayName || currentUser.email || currentUser.id}`);
     if (mainWindow) mainWindow.webContents.send('current-user', currentUser);
+    if (agentRunner) agentRunner.setIdentity(currentUser);
   } catch (err) {
     console.warn('[LGTM] Could not resolve current user:', err.message);
     currentUser = null;
+    if (agentRunner) agentRunner.setIdentity(null);
   }
 
   pollPrs();
@@ -356,6 +358,37 @@ ipcMain.handle('cancel-review', (_event, key) => {
 
 ipcMain.handle('get-review-output', (_event, key) => {
   return agentRunner.getReviewOutput(key);
+});
+
+ipcMain.handle('get-review-detail', (_event, key) => {
+  return agentRunner.getReviewDetail(key);
+});
+
+ipcMain.handle('rerun-review', async (_event, { key, agentId, model }) => {
+  return agentRunner.rerunReview(key, { agentId, model });
+});
+
+ipcMain.handle('open-path', (_event, p) => {
+  if (typeof p !== 'string' || !p) return { success: false, error: 'No path provided' };
+  // Pass to the OS shell — it picks Finder/Explorer based on platform.
+  return shell.openPath(p).then((err) => err ? { success: false, error: err } : { success: true });
+});
+
+ipcMain.handle('save-log-file', async (_event, { key, suggestedName }) => {
+  const review = agentRunner.getReviewDetail(key);
+  if (!review) return { success: false, error: 'No review found' };
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save agent log',
+    defaultPath: suggestedName || `lgtm-${key.replace(/[\\/:*?"<>|]/g, '_')}.log`,
+    filters: [{ name: 'Log', extensions: ['log', 'txt'] }, { name: 'All', extensions: ['*'] }],
+  });
+  if (result.canceled || !result.filePath) return { success: false, cancelled: true };
+  try {
+    require('fs').writeFileSync(result.filePath, review.output || '', 'utf8');
+    return { success: true, filePath: result.filePath };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
 });
 
 // ── IPC: Agents ──────────────────────────────────────────────────────

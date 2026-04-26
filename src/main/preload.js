@@ -27,6 +27,10 @@ contextBridge.exposeInMainWorld('lgtm', {
   cancelReview: (key) => ipcRenderer.invoke('cancel-review', key),
   getReviews: () => ipcRenderer.invoke('get-reviews'),
   getReviewOutput: (key) => ipcRenderer.invoke('get-review-output', key),
+  getReviewDetail: (key) => ipcRenderer.invoke('get-review-detail', key),
+  rerunReview: ({ key, agentId, model }) => ipcRenderer.invoke('rerun-review', { key, agentId, model }),
+  openPath: (path) => ipcRenderer.invoke('open-path', path),
+  saveLogFile: ({ key, suggestedName }) => ipcRenderer.invoke('save-log-file', { key, suggestedName }),
 
   // Agents
   getAgents: () => ipcRenderer.invoke('get-agents'),

@@ -130,15 +130,64 @@
   <!-- ─── Review detail panel ─────────────────────────────── -->
   <section id="review-detail-view" class="view hidden">
     <div class="review-detail-header">
-      <button id="review-back-btn" class="btn-icon" title="Back to PR list">←</button>
+      <button id="review-back-btn" class="btn-icon" title="Back to list">←</button>
       <div class="review-detail-info">
         <span id="review-detail-title" class="review-detail-title"></span>
         <span id="review-detail-meta" class="review-detail-meta"></span>
       </div>
+      <span id="review-elapsed" class="review-elapsed" title="Elapsed time"></span>
       <button id="review-detail-cancel-btn" class="btn-cancel-review hidden" title="Cancel review">&#10005;</button>
       <div id="review-detail-dot" class="status-dot"></div>
     </div>
-    <div id="review-output" class="review-output"></div>
+
+    <div class="review-detail-actions">
+      <button id="rd-open-ado" class="btn-detail-action" title="Open in Azure DevOps">Open in DevOps</button>
+      <button id="rd-open-clone" class="btn-detail-action hidden" title="Reveal cloned repo in file browser">Reveal clone</button>
+      <button id="rd-copy" class="btn-detail-action" title="Copy log to clipboard">Copy log</button>
+      <button id="rd-save" class="btn-detail-action" title="Save log to file">Save log</button>
+      <div class="rd-rerun-group">
+        <button id="rd-rerun" class="btn-detail-action" title="Re-run with same agent and model">Re-run</button>
+        <button id="rd-rerun-menu" class="btn-detail-action rd-rerun-menu" title="Re-run with different agent / model">▾</button>
+      </div>
+    </div>
+
+    <div id="rd-rerun-popover" class="rd-rerun-popover hidden">
+      <label>Agent</label>
+      <select id="rd-rerun-agent"></select>
+      <label>Model</label>
+      <select id="rd-rerun-model"></select>
+      <div class="btn-row">
+        <button id="rd-rerun-confirm" class="btn-primary">Re-run</button>
+        <button id="rd-rerun-cancel" class="btn-secondary">Cancel</button>
+      </div>
+    </div>
+
+    <div id="rd-timeline" class="review-detail-timeline"></div>
+
+    <div id="rd-report" class="review-detail-report hidden"></div>
+
+    <details id="rd-prompt-section" class="review-detail-section">
+      <summary>
+        <span class="rd-section-title">Dispatched prompt</span>
+        <span class="rd-section-meta" id="rd-prompt-meta"></span>
+      </summary>
+      <pre id="rd-prompt" class="review-detail-prompt"></pre>
+    </details>
+
+    <details id="rd-output-section" class="review-detail-section" open>
+      <summary>
+        <span class="rd-section-title">Agent output</span>
+        <span class="rd-section-meta" id="rd-output-meta"></span>
+        <span class="review-output-tools">
+          <input id="rd-search" type="search" placeholder="Search log…" autocomplete="off" spellcheck="false">
+          <label class="follow-tail-label" title="Auto-scroll to the latest output">
+            <input type="checkbox" id="rd-follow-tail" checked> Follow
+          </label>
+        </span>
+      </summary>
+      <div id="review-output" class="review-output"></div>
+      <button id="rd-jump-bottom" class="rd-jump-bottom hidden" type="button">Jump to latest ↓</button>
+    </details>
   </section>
 
   <!-- ─── Settings panel ──────────────────────────────────── -->

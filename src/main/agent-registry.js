@@ -14,9 +14,18 @@ const path = require('path');
 
 /**
  * Electron apps on macOS don't inherit the user's shell PATH when launched
- * from Finder/Dock. This means CLIs installed via Homebrew, npm -g, etc.
- * won't be found by `which`. We fix this by appending common install
- * locations to the PATH used for detection and spawning.
+ * from Finder/Dock. This means CLIs installed via Homebrew, npm -g, nvm,
+ * asdf, fnm, volta, etc. won't be found by `which`. We rebuild PATH from
+ * three sources, in order of precedence:
+ *
+ *   1. The user's interactive shell PATH (most authoritative — picks up
+ *      whatever the user actually has set up: nvm, asdf, custom dirs)
+ *   2. Hardcoded common install locations (fallback if shell launch fails)
+ *   3. The PATH Electron started with
+ *
+ * Critical because some agent CLIs are node shebang scripts (e.g. auggie's
+ * `#!/usr/bin/env node`) — they need `node` itself on PATH at spawn time,
+ * not just the agent binary.
  */
 const HOME = process.env.HOME || process.env.USERPROFILE || '';
 const SEP = process.platform === 'win32' ? ';' : ':';
@@ -47,14 +56,51 @@ const EXTRA_PATHS_WIN = [
 
 const EXTRA_PATHS = process.platform === 'win32' ? EXTRA_PATHS_WIN : EXTRA_PATHS_UNIX;
 
+/**
+ * Spawn the user's login shell and read its PATH. This is what `fix-path`
+ * does — we inline it to avoid the dependency. Returns null on Windows
+ * (cmd/PowerShell already give Electron a usable PATH) or on failure.
+ */
+function getUserShellPath() {
+  if (process.platform === 'win32') return null;
+  const shell = process.env.SHELL || '/bin/zsh';
+  try {
+    // -i makes the shell interactive (sources .zshrc/.bashrc),
+    // -l makes it a login shell (sources .zprofile/.bash_profile),
+    // -c runs the command. Together they reproduce what the user gets
+    // when they open Terminal.
+    const out = execSync(`${shell} -ilc 'echo -n "$PATH"'`, {
+      timeout: 3000,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+
 function getEnhancedPath() {
-  const currentPath = process.env.PATH || '';
-  const extra = EXTRA_PATHS.filter((p) => p && !currentPath.includes(p));
-  return extra.length > 0 ? `${currentPath}${SEP}${extra.join(SEP)}` : currentPath;
+  const seen = new Set();
+  const parts = [];
+  const push = (raw) => {
+    if (!raw) return;
+    for (const p of raw.split(SEP)) {
+      const trimmed = p.trim();
+      if (!trimmed || seen.has(trimmed)) continue;
+      seen.add(trimmed);
+      parts.push(trimmed);
+    }
+  };
+  push(getUserShellPath());
+  push(process.env.PATH);
+  for (const p of EXTRA_PATHS) push(p);
+  return parts.join(SEP);
 }
 
 // Apply the enhanced PATH to the process so child_process.spawn also sees it
 process.env.PATH = getEnhancedPath();
+console.log(`[LGTM] Effective PATH (${process.env.PATH.split(SEP).length} entries)`);
 
 /**
  * Agent definitions.
@@ -74,12 +120,15 @@ const AGENTS = [
       { id: 'claude-opus-4-6',   label: 'Claude Opus 4.6' },
       { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
     ],
-    // claude -p "prompt" OR echo "prompt" | claude -p
-    // Using stdin piping to avoid shell escaping issues with large prompts
-    buildCmd: (_prompt, model) => {
-      const args = ['-p', '--verbose'];
+    // claude -p reads the prompt from stdin and prints the result.
+    // bypassPermissions is required for autonomous (non-interactive)
+    // runs — without it, claude will hang the first time it wants to
+    // run a tool, waiting for a permission prompt that the renderer
+    // never surfaces.
+    buildCmd: (_prompt, model, resolvedCli) => {
+      const args = ['-p', '--verbose', '--permission-mode', 'bypassPermissions'];
       if (model) args.push('--model', model);
-      return { command: 'claude', args, stdinPrompt: true };
+      return { command: resolvedCli || 'claude', args, stdinPrompt: true };
     },
   },
   {
@@ -91,10 +140,10 @@ const AGENTS = [
       { id: 'o3',         label: 'o3' },
       { id: 'gpt-4.1',    label: 'GPT-4.1' },
     ],
-    buildCmd: (_prompt, model) => {
+    buildCmd: (_prompt, model, resolvedCli) => {
       const args = ['--quiet'];
       if (model) args.push('--model', model);
-      return { command: 'codex', args, stdinPrompt: true };
+      return { command: resolvedCli || 'codex', args, stdinPrompt: true };
     },
   },
   {
@@ -110,10 +159,14 @@ const AGENTS = [
       { id: 'o3',         label: 'o3' },
     ],
     buildCmd: (_prompt, model, resolvedCli) => {
-      const cmd = resolvedCli || 'auggie';
-      const args = ['run'];
+      // --print forces non-interactive (one-shot) mode and reads the
+      // instruction from stdin. Without it, auggie warns "Interactive
+      // mode requires a terminal with raw mode support" and falls back
+      // to print mode anyway. (Note: there is no `run` subcommand —
+      // anything positional is parsed as the instruction text.)
+      const args = ['--print'];
       if (model && model !== 'default') args.push('--model', model);
-      return { command: cmd, args, stdinPrompt: true };
+      return { command: resolvedCli || 'auggie', args, stdinPrompt: true };
     },
   },
 ];
@@ -148,17 +201,18 @@ class AgentRegistry {
    */
   refresh() {
     this._cache = {};       // agentId → boolean
-    this._resolvedCli = {}; // agentId → actual command name found
+    this._resolvedCli = {}; // agentId → absolute path of resolved binary
 
     for (const agent of AGENTS) {
       const cliNames = Array.isArray(agent.cli) ? agent.cli : [agent.cli];
       let found = false;
 
       for (const name of cliNames) {
-        if (AgentRegistry._isInstalled(name)) {
+        const absolutePath = AgentRegistry._resolveBinary(name);
+        if (absolutePath) {
           this._cache[agent.id] = true;
-          this._resolvedCli[agent.id] = name;
-          console.log(`[LGTM] Agent "${agent.name}" found via: ${name}`);
+          this._resolvedCli[agent.id] = absolutePath;
+          console.log(`[LGTM] Agent "${agent.name}" found at: ${absolutePath}`);
           found = true;
           break;
         }
@@ -175,6 +229,9 @@ class AgentRegistry {
 
   /**
    * Build the shell command + args for a given agent and prompt.
+   * Returns { command, args, stdinPrompt } where `command` is the absolute
+   * path to the binary (when known) so spawn doesn't need to do its own
+   * PATH lookup.
    */
   buildCommand(agentId, prompt, model) {
     const agent = AGENTS.find((a) => a.id === agentId);
@@ -184,9 +241,19 @@ class AgentRegistry {
   }
 
   /**
-   * Check if a CLI command exists on the PATH.
+   * Get the resolved absolute path for an agent's CLI (or null).
    */
-  static _isInstalled(command) {
+  getResolvedPath(agentId) {
+    return (this._resolvedCli && this._resolvedCli[agentId]) || null;
+  }
+
+  /**
+   * Resolve a CLI name to an absolute path using `which`/`where`.
+   * Returns null if not found. We resolve once at startup and reuse the
+   * absolute path forever after — that way spawn never has to do its own
+   * PATH lookup, which is the most common Electron-spawn failure mode.
+   */
+  static _resolveBinary(command) {
     try {
       const which = process.platform === 'win32' ? 'where' : 'which';
       const result = execSync(`${which} ${command}`, {
@@ -194,11 +261,14 @@ class AgentRegistry {
         encoding: 'utf8',
         env: { ...process.env },   // uses the enhanced PATH
       }).trim();
-      console.log(`[LGTM]   which ${command} → ${result}`);
-      return true;
+      // `where` on Windows can return multiple lines — take the first.
+      const firstLine = result.split(/\r?\n/)[0].trim();
+      if (!firstLine) return null;
+      console.log(`[LGTM]   which ${command} → ${firstLine}`);
+      return firstLine;
     } catch {
       console.log(`[LGTM]   which ${command} → not found`);
-      return false;
+      return null;
     }
   }
 }

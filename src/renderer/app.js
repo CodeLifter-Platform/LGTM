@@ -67,6 +67,28 @@ const reviewDetailMeta  = $('#review-detail-meta');
 const reviewDetailDot   = $('#review-detail-dot');
 const reviewDetailCancelBtn = $('#review-detail-cancel-btn');
 const reviewOutputEl    = $('#review-output');
+const reviewElapsedEl   = $('#review-elapsed');
+const rdOpenAdoBtn      = $('#rd-open-ado');
+const rdOpenCloneBtn    = $('#rd-open-clone');
+const rdCopyBtn         = $('#rd-copy');
+const rdSaveBtn         = $('#rd-save');
+const rdRerunBtn        = $('#rd-rerun');
+const rdRerunMenuBtn    = $('#rd-rerun-menu');
+const rdRerunPopover    = $('#rd-rerun-popover');
+const rdRerunAgentSel   = $('#rd-rerun-agent');
+const rdRerunModelSel   = $('#rd-rerun-model');
+const rdRerunConfirmBtn = $('#rd-rerun-confirm');
+const rdRerunCancelBtn  = $('#rd-rerun-cancel');
+const rdTimelineEl      = $('#rd-timeline');
+const rdReportEl        = $('#rd-report');
+const rdPromptSection   = $('#rd-prompt-section');
+const rdPromptEl        = $('#rd-prompt');
+const rdPromptMetaEl    = $('#rd-prompt-meta');
+const rdOutputSection   = $('#rd-output-section');
+const rdOutputMetaEl    = $('#rd-output-meta');
+const rdSearchInput     = $('#rd-search');
+const rdFollowTail      = $('#rd-follow-tail');
+const rdJumpBottomBtn   = $('#rd-jump-bottom');
 
 // Settings
 const sPromptPath       = $('#s-prompt-path');
@@ -409,7 +431,8 @@ function renderPrList(prs) {
         const prAgeMs = pr.createdDate ? (Date.now() - new Date(pr.createdDate).getTime()) : 0;
         const prAgeDays = Math.floor(prAgeMs / (24 * 60 * 60 * 1000));
         const isOld = prAgeDays > maxPrAgeDays;
-        item.className = `pr-item grouped${isOld ? ' stale' : ''}`;
+        const isCloning = reviewStatus === 'cloning';
+        item.className = `pr-item grouped${isOld ? ' stale' : ''}${isCloning ? ' cloning' : ''}`;
 
         // Status dot
         const dot = document.createElement('div');
@@ -434,27 +457,48 @@ function renderPrList(prs) {
         actions.className = 'pr-actions';
 
         if (reviewStatus) {
-          const badge = document.createElement('span');
-          badge.className = `pr-review-badge ${reviewStatus}`;
-          badge.textContent = reviewStatus === 'cloning' ? 'cloning\u2026' : reviewStatus;
-          actions.appendChild(badge);
+          if (isCloning) {
+            const loader = document.createElement('span');
+            loader.className = 'row-loader';
+            loader.setAttribute('aria-label', 'Cloning repo');
+            const ring = document.createElement('span');
+            ring.className = 'spinner-ring';
+            const label = document.createElement('span');
+            label.textContent = 'cloning\u2026';
+            loader.appendChild(ring);
+            loader.appendChild(label);
+            actions.appendChild(loader);
 
-          if (reviewStatus === 'running' || reviewStatus === 'cloning') {
             const cancelBtn = document.createElement('button');
             cancelBtn.className = 'btn-cancel-review';
-            cancelBtn.textContent = '✕';  // ✕
-            cancelBtn.title = 'Cancel review';
+            cancelBtn.textContent = '✕';
+            cancelBtn.title = 'Cancel';
             cancelBtn.addEventListener('click', (e) => {
               e.stopPropagation();
               cancelReview(key);
             });
             actions.appendChild(cancelBtn);
-          }
+          } else {
+            const badge = document.createElement('span');
+            badge.className = `pr-review-badge ${reviewStatus}`;
+            badge.textContent = reviewStatus;
+            actions.appendChild(badge);
 
-          if (reviewStatus === 'running' || reviewStatus === 'completed' || reviewStatus === 'failed' || reviewStatus === 'cloning' || reviewStatus === 'cancelled') {
+            if (reviewStatus === 'running') {
+              const cancelBtn = document.createElement('button');
+              cancelBtn.className = 'btn-cancel-review';
+              cancelBtn.textContent = '✕';
+              cancelBtn.title = 'Cancel review';
+              cancelBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                cancelReview(key);
+              });
+              actions.appendChild(cancelBtn);
+            }
+
             const viewBtn = document.createElement('button');
             viewBtn.className = 'btn-view-review';
-            viewBtn.textContent = '\u25B8';  // ▸
+            viewBtn.textContent = '\u25B8';
             viewBtn.title = 'View review output';
             viewBtn.addEventListener('click', (e) => {
               e.stopPropagation();
@@ -510,7 +554,9 @@ function renderPrList(prs) {
         item.appendChild(actions);
 
         // Click: if a review exists, open the detail; otherwise toggle reveal.
+        // While cloning, the row is locked — only the inline Cancel button works.
         item.addEventListener('click', () => {
+          if (isCloning) return;
           if (reviewStatus) {
             openReviewDetail(key, pr, reviewStatus, reviewAgent);
           } else if (revealedRows.has(key)) {
@@ -776,6 +822,15 @@ function rerenderForKey(key) {
 }
 
 // ── Review detail panel ──────────────────────────────────────────
+let detailState = {
+  key: null,
+  detail: null,        // last full snapshot from getReviewDetail
+  followTail: true,
+  searchTerm: '',
+  rawOutput: '',
+};
+let elapsedTimer = null;
+
 function updateDetailCancelVisibility(status) {
   if (status === 'running' || status === 'cloning') {
     reviewDetailCancelBtn.classList.remove('hidden');
@@ -786,54 +841,446 @@ function updateDetailCancelVisibility(status) {
 
 async function openReviewDetail(key, pr, status, agentId) {
   activeDetailKey = key;
-  detailSourceTab = activeTab;  // remember which tab to return to
+  detailSourceTab = activeTab;
+  detailState = { key, detail: null, followTail: true, searchTerm: '', rawOutput: '' };
+  rdSearchInput.value = '';
+  rdFollowTail.checked = true;
+  rdJumpBottomBtn.classList.add('hidden');
 
-  const titleLeft = pr.repo ? `${pr.repo}/#${pr.id}` : `#${pr.id}`;
+  const titleLeft = pr && pr.repo ? `${pr.repo}/#${pr.id}` : (pr ? `#${pr.id}` : key);
   reviewDetailTitle.textContent = titleLeft;
-  reviewDetailMeta.textContent = `${pr.title} · ${agentId || 'unknown'}`;
-  reviewDetailDot.className = `status-dot ${status}`;
+  reviewDetailMeta.textContent = `${pr && pr.title ? pr.title + ' · ' : ''}${agentId || 'unknown'}`;
+  reviewDetailDot.className = `status-dot ${status || 'pending'}`;
   updateDetailCancelVisibility(status);
 
-  // Load existing output
-  const existingOutput = await window.lgtm.getReviewOutput(key);
-  const localOutput = reviewStatuses[key] ? reviewStatuses[key].output : '';
-  const output = existingOutput || localOutput || '';
-
-  renderMarkdown(output);
   showView(reviewDetailView);
+  startElapsedTimer();
 
-  // Auto-scroll to bottom
-  reviewOutputEl.scrollTop = reviewOutputEl.scrollHeight;
+  // Pull full detail (prompt, timeline, report, clone path) from main.
+  let detail = null;
+  try { detail = await window.lgtm.getReviewDetail(key); } catch { /* ignore */ }
+  detailState.detail = detail;
+
+  // Output: prefer main's authoritative copy, fall back to local mirror.
+  const localOutput = reviewStatuses[key] ? reviewStatuses[key].output : '';
+  detailState.rawOutput = (detail && detail.output) || localOutput || '';
+
+  // Hydrate UI from detail (if available).
+  if (detail) {
+    reviewDetailMeta.textContent = formatDetailMeta(detail);
+    renderTimeline(detail);
+    renderReportCard(detail);
+    renderPromptPanel(detail);
+    updateActionButtons(detail);
+  } else {
+    rdTimelineEl.innerHTML = '';
+    rdReportEl.classList.add('hidden');
+    rdPromptEl.textContent = '';
+    rdPromptMetaEl.textContent = '';
+    updateActionButtons(null);
+  }
+
+  renderOutput();
+  scheduleScrollToBottom();
 }
 
-function renderMarkdown(text) {
-  // Simple markdown-ish rendering: escape HTML, then convert code blocks and basics
-  let html = escHtml(text);
+function formatDetailMeta(detail) {
+  const parts = [];
+  if (detail.pr && detail.pr.title) parts.push(detail.pr.title);
+  if (detail.agentId) parts.push(detail.agentId + (detail.model ? `:${detail.model}` : ''));
+  if (detail.scenarioId) parts.push(detail.scenarioId);
+  if (detail.mode && detail.mode !== 'review') parts.push(`mode=${detail.mode}`);
+  return parts.join(' · ');
+}
 
-  // Code blocks: ```lang\n...\n```
+function startElapsedTimer() {
+  if (elapsedTimer) clearInterval(elapsedTimer);
+  const tick = () => {
+    const d = detailState.detail;
+    if (!d) { reviewElapsedEl.textContent = ''; return; }
+    const end = (d.status === 'completed' || d.status === 'failed' || d.status === 'cancelled')
+      ? (d.finishedAt || Date.now())
+      : Date.now();
+    const ms = Math.max(0, end - (d.startedAt || end));
+    reviewElapsedEl.textContent = formatDuration(ms);
+  };
+  tick();
+  elapsedTimer = setInterval(tick, 1000);
+}
+
+function stopElapsedTimer() {
+  if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+}
+
+function formatDuration(ms) {
+  if (ms < 1000) return '0s';
+  const total = Math.floor(ms / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function renderTimeline(detail) {
+  const timeline = detail.timeline || [];
+  if (timeline.length === 0) { rdTimelineEl.innerHTML = ''; return; }
+  const parts = [];
+  for (let i = 0; i < timeline.length; i++) {
+    const cur = timeline[i];
+    const next = timeline[i + 1];
+    const isLast = i === timeline.length - 1;
+    let endAt;
+    if (next) endAt = next.at;
+    else if (isLast && (cur.status === 'completed' || cur.status === 'failed' || cur.status === 'cancelled'))
+      endAt = detail.finishedAt || cur.at;
+    else endAt = Date.now();
+    const dur = formatDuration(Math.max(0, endAt - cur.at));
+    parts.push(
+      `<span class="timeline-pill ${cur.status}">` +
+      `<span class="dot"></span>` +
+      `<span class="label">${cur.status}</span>` +
+      `<span class="duration">${dur}</span>` +
+      `</span>`
+    );
+  }
+  rdTimelineEl.innerHTML = parts.join('');
+}
+
+function renderReportCard(detail) {
+  if (detail.reportStatus === 'report_unparseable') {
+    rdReportEl.innerHTML = `
+      <div class="report-title">Final report</div>
+      <div class="report-unparseable">Could not parse final JSON report${detail.reportError ? ` — ${escHtml(detail.reportError)}` : ''}.</div>
+    `;
+    rdReportEl.classList.remove('hidden');
+    return;
+  }
+  const report = detail.report;
+  if (!report) { rdReportEl.classList.add('hidden'); return; }
+
+  let html = '<div class="report-title">Final report</div><div class="report-grid">';
+
+  if (detail.scenarioId === 'pr-review') {
+    html += stat('Comments posted', report.comments_posted);
+    html += stat('Files reviewed', report.files_reviewed);
+    html += stat('Rule violations', report.rules_violations_flagged);
+    html += stat('Suppressed dupes', report.comments_suppressed_as_duplicate);
+    html += '</div>';
+    if (report.severity_breakdown) {
+      const sb = report.severity_breakdown;
+      html += '<div class="severity-row">'
+        + sevChip('blocking', sb.blocking)
+        + sevChip('important', sb.important)
+        + sevChip('suggestion', sb.suggestion)
+        + sevChip('nit', sb.nit)
+        + '</div>';
+    }
+  } else if (detail.scenarioId === 'resolve-comments') {
+    html += stat('Threads processed', report.threads_processed);
+    html += stat('Fixed', report.threads_fixed);
+    html += stat('Won\'t fix', report.threads_wont_fix);
+    html += stat('Cannot resolve', report.threads_cannot_resolve);
+    html += stat('Commits pushed', report.commits_pushed);
+    html += '</div>';
+  } else if (detail.scenarioId === 'implement-ticket') {
+    html += stat('Outcome', report.outcome || '—');
+    html += stat('Files changed', report.files_changed);
+    html += stat('Tests added', report.tests_added);
+    html += stat('Tests modified', report.tests_modified);
+    html += '</div>';
+    if (report.pr_id && report.pr_url) {
+      html += `<a class="report-link" data-href="${escHtml(report.pr_url)}">→ Open PR !${report.pr_id}</a>`;
+    } else if (report.branch_name) {
+      html += `<div style="font-size:11px;color:var(--text-dim);margin-top:4px">Branch: <code>${escHtml(report.branch_name)}</code></div>`;
+    }
+  } else {
+    html += '</div>';
+  }
+
+  if (report.notes_for_human) {
+    html += `<div class="report-notes">${escHtml(report.notes_for_human)}</div>`;
+  }
+
+  rdReportEl.innerHTML = html;
+  rdReportEl.classList.remove('hidden');
+
+  const linkEl = rdReportEl.querySelector('.report-link');
+  if (linkEl) {
+    linkEl.addEventListener('click', () => {
+      const href = linkEl.getAttribute('data-href');
+      if (href) window.lgtm.openExternal(href);
+    });
+  }
+
+  function stat(label, value) {
+    const v = (value === undefined || value === null) ? '—' : value;
+    return `<div class="report-stat"><span class="label">${escHtml(label)}</span><span class="value">${escHtml(String(v))}</span></div>`;
+  }
+  function sevChip(kind, n) {
+    const v = (n === undefined || n === null) ? 0 : n;
+    return `<span class="severity-chip ${kind}">${escHtml(kind)} <strong>${v}</strong></span>`;
+  }
+}
+
+function renderPromptPanel(detail) {
+  const prompt = detail.prompt || '';
+  rdPromptEl.textContent = prompt;
+  rdPromptMetaEl.textContent = prompt
+    ? `${prompt.length.toLocaleString()} chars`
+    : '(not yet built)';
+}
+
+function updateActionButtons(detail) {
+  const status = detail ? detail.status : null;
+  rdOpenAdoBtn.disabled = !(detail && detail.pr && detail.pr.webUrl);
+  rdCopyBtn.disabled = !(detail && detail.output);
+  rdSaveBtn.disabled = !(detail && detail.output);
+  // Reveal clone: only meaningful while we have a clone path on disk
+  // (cloning/running). After the run finishes the cloner cleans it up.
+  if (detail && detail.clonePath && (status === 'cloning' || status === 'running')) {
+    rdOpenCloneBtn.classList.remove('hidden');
+    rdOpenCloneBtn.disabled = false;
+  } else {
+    rdOpenCloneBtn.classList.add('hidden');
+  }
+  // Re-run: only when finished.
+  const canRerun = !!detail && (status === 'completed' || status === 'failed' || status === 'cancelled');
+  rdRerunBtn.disabled = !canRerun;
+  rdRerunMenuBtn.disabled = !canRerun;
+}
+
+function renderOutput() {
+  const text = detailState.rawOutput || '';
+  const term = detailState.searchTerm.trim();
+  let html = renderMarkdownToHtml(text);
+  if (term) {
+    const re = new RegExp(escapeRegex(term), 'gi');
+    // Only highlight inside text nodes — but our renderer emits naive HTML;
+    // safe enough to wrap matches outside tags via a heuristic split.
+    html = html.replace(/(>[^<]+)/g, (chunk) => chunk.replace(re, (m) => `<mark>${m}</mark>`));
+  }
+  reviewOutputEl.innerHTML = html;
+  if (rdOutputMetaEl) {
+    const lines = text ? text.split('\n').length : 0;
+    rdOutputMetaEl.textContent = `${lines.toLocaleString()} lines · ${text.length.toLocaleString()} chars${term ? ` · filter: "${term}"` : ''}`;
+  }
+}
+
+function renderMarkdownToHtml(text) {
+  let html = escHtml(text);
   html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="lang-$1">$2</code></pre>');
-  // Inline code
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // Bold
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  // Headers
   html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>');
   html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>');
   html = html.replace(/^# (.+)$/gm, '<h2>$1</h2>');
-  // Line breaks
   html = html.replace(/\n/g, '<br>');
+  return html;
+}
 
-  reviewOutputEl.innerHTML = html;
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function scheduleScrollToBottom() {
+  // Wait for DOM paint so scrollHeight is correct.
+  requestAnimationFrame(() => {
+    if (detailState.followTail) {
+      reviewOutputEl.scrollTop = reviewOutputEl.scrollHeight;
+    }
+  });
 }
 
 reviewBackBtn.addEventListener('click', () => {
   activeDetailKey = null;
+  stopElapsedTimer();
   setActiveTab(detailSourceTab || 'prs');
   showView(prListView);
 });
 
 reviewDetailCancelBtn.addEventListener('click', () => {
   if (activeDetailKey) cancelReview(activeDetailKey);
+});
+
+// ── Detail action bar ────────────────────────────────────────────
+rdOpenAdoBtn.addEventListener('click', () => {
+  const url = detailState.detail && detailState.detail.pr && detailState.detail.pr.webUrl;
+  if (url) window.lgtm.openExternal(url);
+});
+
+rdOpenCloneBtn.addEventListener('click', async () => {
+  const p = detailState.detail && detailState.detail.clonePath;
+  if (!p) return;
+  const result = await window.lgtm.openPath(p);
+  if (!result || !result.success) {
+    alert((result && result.error) || 'Could not open clone path.');
+  }
+});
+
+rdCopyBtn.addEventListener('click', async () => {
+  const text = detailState.rawOutput || '';
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    flashButton(rdCopyBtn, 'Copied');
+  } catch {
+    alert('Copy failed. Try Save log instead.');
+  }
+});
+
+rdSaveBtn.addEventListener('click', async () => {
+  if (!activeDetailKey) return;
+  const suggested = sanitizeFilename(`lgtm-${activeDetailKey}.log`);
+  const result = await window.lgtm.saveLogFile({ key: activeDetailKey, suggestedName: suggested });
+  if (result && result.success) flashButton(rdSaveBtn, 'Saved');
+  else if (result && !result.cancelled) alert(result.error || 'Could not save log.');
+});
+
+function flashButton(btn, msg) {
+  const orig = btn.textContent;
+  btn.textContent = msg;
+  btn.disabled = true;
+  setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1100);
+}
+
+function sanitizeFilename(name) {
+  return name.replace(/[\\/:*?"<>|]/g, '_');
+}
+
+// ── Re-run ───────────────────────────────────────────────────────
+rdRerunBtn.addEventListener('click', () => doRerun(null, null));
+
+rdRerunMenuBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (rdRerunPopover.classList.contains('hidden')) openRerunPopover();
+  else closeRerunPopover();
+});
+
+rdRerunCancelBtn.addEventListener('click', closeRerunPopover);
+rdRerunConfirmBtn.addEventListener('click', () => {
+  doRerun(rdRerunAgentSel.value || null, rdRerunModelSel.value || null);
+  closeRerunPopover();
+});
+
+document.addEventListener('click', (e) => {
+  if (rdRerunPopover.classList.contains('hidden')) return;
+  if (rdRerunPopover.contains(e.target) || rdRerunMenuBtn.contains(e.target)) return;
+  closeRerunPopover();
+});
+
+function openRerunPopover() {
+  rdRerunAgentSel.innerHTML = '';
+  agents.forEach((a) => {
+    if (!a.available) return;
+    const opt = document.createElement('option');
+    opt.value = a.id;
+    opt.textContent = a.name;
+    rdRerunAgentSel.appendChild(opt);
+  });
+  rdRerunAgentSel.value = (detailState.detail && detailState.detail.agentId) || agents.find((a) => a.available)?.id || '';
+  populateRerunModels();
+  rdRerunAgentSel.onchange = populateRerunModels;
+  rdRerunPopover.classList.remove('hidden');
+}
+
+function populateRerunModels() {
+  rdRerunModelSel.innerHTML = '';
+  const agent = agents.find((a) => a.id === rdRerunAgentSel.value);
+  if (!agent) return;
+  agent.models.forEach((m) => {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = m.label;
+    rdRerunModelSel.appendChild(opt);
+  });
+  const preferred = (detailState.detail && detailState.detail.agentId === agent.id)
+    ? detailState.detail.model
+    : agentModels[agent.id];
+  if (preferred && agent.models.some((m) => m.id === preferred)) {
+    rdRerunModelSel.value = preferred;
+  }
+}
+
+function closeRerunPopover() { rdRerunPopover.classList.add('hidden'); }
+
+async function doRerun(agentId, model) {
+  if (!activeDetailKey) return;
+  // Wipe the cached output / report so we don't see the previous run's
+  // content stitched onto the new run. The new dispatch reuses the same key.
+  detailState.rawOutput = '';
+  detailState.detail = null;
+  rdReportEl.classList.add('hidden');
+  rdTimelineEl.innerHTML = '';
+  rdPromptEl.textContent = '';
+  rdPromptMetaEl.textContent = '';
+  reviewOutputEl.innerHTML = '';
+  rdJumpBottomBtn.classList.add('hidden');
+  detailState.followTail = true;
+  rdFollowTail.checked = true;
+  if (reviewStatuses[activeDetailKey]) reviewStatuses[activeDetailKey].output = '';
+
+  const result = await window.lgtm.rerunReview({
+    key: activeDetailKey,
+    agentId,
+    model,
+  });
+  if (!result || !result.success) {
+    alert((result && result.error) || 'Re-run failed.');
+    return;
+  }
+
+  // Pull a fresh detail snapshot so the timeline/prompt panels populate
+  // immediately for the new run.
+  const detail = await window.lgtm.getReviewDetail(activeDetailKey).catch(() => null);
+  if (detail && activeDetailKey === detail.key) {
+    detailState.detail = detail;
+    renderTimeline(detail);
+    renderPromptPanel(detail);
+    updateActionButtons(detail);
+    startElapsedTimer();
+  }
+}
+
+// ── Output toolbar (search + follow tail) ────────────────────────
+rdSearchInput.addEventListener('input', () => {
+  detailState.searchTerm = rdSearchInput.value || '';
+  renderOutput();
+});
+
+rdFollowTail.addEventListener('change', () => {
+  detailState.followTail = rdFollowTail.checked;
+  if (detailState.followTail) {
+    reviewOutputEl.scrollTop = reviewOutputEl.scrollHeight;
+    rdJumpBottomBtn.classList.add('hidden');
+  }
+});
+
+reviewOutputEl.addEventListener('scroll', () => {
+  const el = reviewOutputEl;
+  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+  if (nearBottom) {
+    detailState.followTail = true;
+    rdFollowTail.checked = true;
+    rdJumpBottomBtn.classList.add('hidden');
+  } else {
+    if (detailState.followTail) {
+      // User scrolled away from the tail — disable follow.
+      detailState.followTail = false;
+      rdFollowTail.checked = false;
+    }
+    if (detailState.detail && (detailState.detail.status === 'cloning' || detailState.detail.status === 'running')) {
+      rdJumpBottomBtn.classList.remove('hidden');
+    }
+  }
+});
+
+rdJumpBottomBtn.addEventListener('click', () => {
+  detailState.followTail = true;
+  rdFollowTail.checked = true;
+  reviewOutputEl.scrollTop = reviewOutputEl.scrollHeight;
+  rdJumpBottomBtn.classList.add('hidden');
 });
 
 // ── Refresh (refreshes the active tab) ───────────────────────────
@@ -988,7 +1435,8 @@ function renderWorkItemRow(container, wi, typeLabel) {
   const priLabel = pri ? `P${pri}` : '—';
 
   const row = document.createElement('div');
-  row.className = 'pr-item grouped';
+  const isCloning = reviewStatus === 'cloning';
+  row.className = `pr-item grouped${isCloning ? ' cloning' : ''}`;
 
   const priEl = document.createElement('span');
   priEl.className = `bug-pri ${priClass}`;
@@ -1017,12 +1465,18 @@ function renderWorkItemRow(container, wi, typeLabel) {
   actions.className = 'pr-actions';
 
   if (reviewStatus) {
-    const badge = document.createElement('span');
-    badge.className = `pr-review-badge ${reviewStatus}`;
-    badge.textContent = reviewStatus === 'cloning' ? 'cloning…' : reviewStatus;
-    actions.appendChild(badge);
+    if (isCloning) {
+      const loader = document.createElement('span');
+      loader.className = 'row-loader';
+      loader.setAttribute('aria-label', 'Cloning repo');
+      const ring = document.createElement('span');
+      ring.className = 'spinner-ring';
+      const label = document.createElement('span');
+      label.textContent = 'cloning…';
+      loader.appendChild(ring);
+      loader.appendChild(label);
+      actions.appendChild(loader);
 
-    if (reviewStatus === 'running' || reviewStatus === 'cloning') {
       const cancelBtn = document.createElement('button');
       cancelBtn.className = 'btn-cancel-review';
       cancelBtn.textContent = '✕';
@@ -1032,17 +1486,34 @@ function renderWorkItemRow(container, wi, typeLabel) {
         cancelReview(runtimeKey);
       });
       actions.appendChild(cancelBtn);
-    }
+    } else {
+      const badge = document.createElement('span');
+      badge.className = `pr-review-badge ${reviewStatus}`;
+      badge.textContent = reviewStatus;
+      actions.appendChild(badge);
 
-    const viewBtn = document.createElement('button');
-    viewBtn.className = 'btn-view-review';
-    viewBtn.textContent = '▸';
-    viewBtn.title = 'View output';
-    viewBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      openReviewDetail(runtimeKey, running.review.pr || wiAsPr(wi), reviewStatus, reviewAgent);
-    });
-    actions.appendChild(viewBtn);
+      if (reviewStatus === 'running') {
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'btn-cancel-review';
+        cancelBtn.textContent = '✕';
+        cancelBtn.title = 'Cancel';
+        cancelBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          cancelReview(runtimeKey);
+        });
+        actions.appendChild(cancelBtn);
+      }
+
+      const viewBtn = document.createElement('button');
+      viewBtn.className = 'btn-view-review';
+      viewBtn.textContent = '▸';
+      viewBtn.title = 'View output';
+      viewBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openReviewDetail(runtimeKey, running.review.pr || wiAsPr(wi), reviewStatus, reviewAgent);
+      });
+      actions.appendChild(viewBtn);
+    }
   } else if (revealedRows.has(revealKey)) {
     const playBtn = document.createElement('button');
     playBtn.className = 'btn-play-row';
@@ -1072,6 +1543,7 @@ function renderWorkItemRow(container, wi, typeLabel) {
   row.appendChild(actions);
 
   row.addEventListener('click', () => {
+    if (isCloning) return;
     if (reviewStatus) {
       openReviewDetail(runtimeKey, running.review.pr || wiAsPr(wi), reviewStatus, reviewAgent);
     } else if (revealedRows.has(revealKey)) {
@@ -1964,6 +2436,38 @@ window.lgtm.onReviewUpdate((data) => {
   if (activeDetailKey === data.key) {
     reviewDetailDot.className = `status-dot ${data.status}`;
     updateDetailCancelVisibility(data.status);
+
+    // Merge the update into our cached detail snapshot so timeline / report
+    // / clonePath stay current without an extra round-trip.
+    if (detailState.detail) {
+      Object.assign(detailState.detail, {
+        status: data.status,
+        timeline: data.timeline || detailState.detail.timeline,
+        clonePath: data.clonePath || detailState.detail.clonePath,
+        report: data.report !== undefined ? data.report : detailState.detail.report,
+        reportStatus: data.reportStatus !== undefined ? data.reportStatus : detailState.detail.reportStatus,
+        reportError: data.reportError !== undefined ? data.reportError : detailState.detail.reportError,
+        finishedAt: data.finishedAt || detailState.detail.finishedAt,
+      });
+    }
+
+    // When the run finishes, refetch the full detail so we get the
+    // dispatched prompt and the parsed report's authoritative copy.
+    if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
+      window.lgtm.getReviewDetail(data.key).then((detail) => {
+        if (activeDetailKey !== data.key || !detail) return;
+        detailState.detail = detail;
+        detailState.rawOutput = detail.output || detailState.rawOutput;
+        renderTimeline(detail);
+        renderReportCard(detail);
+        renderPromptPanel(detail);
+        updateActionButtons(detail);
+        renderOutput();
+      }).catch(() => {});
+    } else if (detailState.detail) {
+      renderTimeline(detailState.detail);
+      updateActionButtons(detailState.detail);
+    }
   }
 });
 
@@ -1976,11 +2480,13 @@ window.lgtm.onReviewOutput((data) => {
 
   // Update detail panel if it's showing this review
   if (activeDetailKey === data.key) {
-    renderMarkdown(reviewStatuses[data.key].output);
-    // Auto-scroll if near bottom
-    const el = reviewOutputEl;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
-    if (nearBottom) el.scrollTop = el.scrollHeight;
+    detailState.rawOutput += data.chunk;
+    renderOutput();
+    if (detailState.followTail) {
+      reviewOutputEl.scrollTop = reviewOutputEl.scrollHeight;
+    } else if (detailState.detail && (detailState.detail.status === 'cloning' || detailState.detail.status === 'running')) {
+      rdJumpBottomBtn.classList.remove('hidden');
+    }
   }
 });
 
