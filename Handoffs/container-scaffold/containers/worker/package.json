@@ -1,0 +1,16 @@
+{
+  "name": "lgtm-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LGTM agent worker — single-run, container-scoped",
+  "main": "src/worker.js",
+  "scripts": {
+    "start": "node src/worker.js"
+  },
+  "dependencies": {
+    "simple-git": "^3.25.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
