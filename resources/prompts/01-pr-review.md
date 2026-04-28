@@ -13,7 +13,18 @@ The orchestrator has provided the following:
 - `SOURCE_BRANCH`: the branch containing the PR's changes
 - `REVIEWER_IDENTITY`: the Azure DevOps identity (display name + unique ID) you are reviewing as
 
-Azure DevOps SDK clients are available for reading PR metadata, reading existing comment threads, and creating new comment threads.
+## Azure DevOps access
+
+Use the Azure DevOps **REST API directly** for all PR / thread operations:
+
+- Base URL: `https://dev.azure.com/{org}/{project}/_apis/...` (or `https://{org}.visualstudio.com/{project}/_apis/...` for legacy orgs)
+- Auth: PAT via `Authorization: Basic <base64(":${PAT}")>` (the PAT is available in the environment)
+- Common endpoints you'll need:
+  - Read PR: `GET /git/repositories/{repoId}/pullRequests/{prId}?api-version=7.1`
+  - List threads: `GET /git/repositories/{repoId}/pullRequests/{prId}/threads?api-version=7.1`
+  - Create a thread anchored to a file/line: `POST /git/repositories/{repoId}/pullRequests/{prId}/threads?api-version=7.1` with `threadContext` (filePath + rightFileStart/End) and a single initial `comment`
+
+**Do not use the Azure DevOps MCP server**, even if one is registered in your environment. Go straight to REST. The MCP wrapper has been unreliable for this workflow — direct REST calls are required.
 
 ## Your Task
 
@@ -36,7 +47,7 @@ Use the merge-base, not a direct two-dot diff, so changes already present in the
 
 ### 2. Read existing review state
 
-Before forming any opinions, fetch every comment thread on this PR via the Azure DevOps SDK. Build an internal inventory of:
+Before forming any opinions, fetch every comment thread on this PR via the REST API (`GET .../pullRequests/{prId}/threads`). Build an internal inventory of:
 
 - Threads opened by humans (any author other than known agents)
 - Threads opened by other automated agents (the team has a separate "PR agent" — its comments are in scope for dedup)
@@ -93,7 +104,7 @@ When in doubt, err toward not posting. A redundant comment is worse than a misse
 
 ### 7. Post comments
 
-For each surviving observation, create a new comment thread via the Azure DevOps SDK, anchored to the correct file and line. Use this structure for the comment body:
+For each surviving observation, create a new comment thread via the REST API (`POST .../pullRequests/{prId}/threads`), anchored to the correct file and line via `threadContext`. Use this structure for the comment body:
 
 ```
 **[Severity] Category**

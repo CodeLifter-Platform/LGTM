@@ -13,7 +13,20 @@ The orchestrator has provided the following:
 - `TARGET_BRANCH`: the branch the PR will merge into
 - `AUTHOR_IDENTITY`: the Azure DevOps identity of the PR author (you, on behalf of the user)
 
-Azure DevOps SDK clients are available for reading PR metadata, reading and modifying comment threads (including status), and posting replies. Git is available for committing and pushing.
+## Azure DevOps access
+
+Use the Azure DevOps **REST API directly** for all PR / thread operations:
+
+- Base URL: `https://dev.azure.com/{org}/{project}/_apis/...` (or `https://{org}.visualstudio.com/{project}/_apis/...` for legacy orgs)
+- Auth: PAT via `Authorization: Basic <base64(":${PAT}")>` (the PAT is available in the environment)
+- Common endpoints you'll need:
+  - List threads: `GET /git/repositories/{repoId}/pullRequests/{prId}/threads?api-version=7.1`
+  - Reply to a thread: `POST /git/repositories/{repoId}/pullRequests/{prId}/threads/{threadId}/comments?api-version=7.1`
+  - Update thread status: `PATCH /git/repositories/{repoId}/pullRequests/{prId}/threads/{threadId}?api-version=7.1` with body `{ "status": "fixed" | "wontFix" | "closed" | ... }`
+
+**Do not use the Azure DevOps MCP server**, even if one is registered in your environment. Go straight to REST. The MCP wrapper has been unreliable for this workflow — direct REST calls are required.
+
+Git is available locally for committing and pushing.
 
 ## Your Task
 
@@ -29,7 +42,7 @@ Pick exactly one action per thread. Do not silently leave threads untouched.
 
 ### 1. Inventory open threads
 
-Fetch all comment threads on the PR via the SDK. Filter to threads whose status is one of: `active`, `pending`, or any non-terminal state. Build a working list, each entry containing:
+Fetch all comment threads on the PR via the REST API (`GET .../pullRequests/{prId}/threads`). Filter to threads whose status is one of: `active`, `pending`, or any non-terminal state. Build a working list, each entry containing:
 
 - Thread ID
 - File path and line range (or null if PR-level)
@@ -80,7 +93,7 @@ For each open thread, in order:
 
 - Reply to the thread with a substantive justification: what the reviewer's concern was, why the current code is correct or preferable, and any context the reviewer may not have had.
 - If the suggestion is reasonable but out of scope, say so explicitly and recommend opening a follow-up ticket.
-- Mark the thread status as `wontFix` (or the closest equivalent your SDK exposes — typically `WontFix` or `Closed` with a reason).
+- Mark the thread status as `wontFix` via `PATCH .../threads/{threadId}` with body `{ "status": "wontFix" }`.
 - Never mark a thread won't-fix without a reasoned reply. Silent dismissal is unacceptable.
 
 **Cannot resolve:**

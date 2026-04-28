@@ -48,32 +48,19 @@ function withTimeout(promise, ms, label) {
 
 class PatStore {
   async get() {
-    // Read the fallback synchronously up front. If we get a hit here
-    // we'll return it even if keytar holds a (theoretically newer)
-    // value — they're written together, so they should match.
+    // The encrypted fallback store is the source of truth on read.
+    // We used to consult keytar first, but on macOS the keychain
+    // ACL prompt for an Electron dev build often fires invisibly
+    // behind a tray-only window — keytar.getPassword then hangs
+    // until our 2.5s timeout, by which point the renderer has
+    // already finished loading and missed the pat-status event.
+    // The fallback store is encrypted at rest with electron-store
+    // and is set on every successful save, so it's always current.
     const fallback = fallbackStore.get('pat');
-
-    if (keytar) {
-      try {
-        const pat = await withTimeout(
-          keytar.getPassword(SERVICE_NAME, ACCOUNT_NAME),
-          KEYTAR_TIMEOUT_MS,
-          'keytar.getPassword',
-        );
-        if (pat) {
-          console.log('[LGTM] PAT loaded from OS keychain.');
-          return pat;
-        }
-      } catch (err) {
-        console.warn('[LGTM] keytar.getPassword skipped:', err.message);
-      }
-    }
-
     if (fallback) {
       console.log('[LGTM] PAT loaded from fallback encrypted store.');
       return fallback;
     }
-
     console.log('[LGTM] No stored PAT found.');
     return null;
   }

@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('lgtm', {
   // PAT
   validatePat: (pat, orgUrl) => ipcRenderer.invoke('validate-pat', { pat, orgUrl }),
+  getPatStatus: () => ipcRenderer.invoke('get-pat-status'),
   clearPat: () => ipcRenderer.invoke('clear-pat'),
   getMe: () => ipcRenderer.invoke('get-me'),
   onCurrentUser: (cb) => ipcRenderer.on('current-user', (_e, u) => cb(u)),
@@ -36,6 +37,19 @@ contextBridge.exposeInMainWorld('lgtm', {
   getAgents: () => ipcRenderer.invoke('get-agents'),
   refreshAgents: () => ipcRenderer.invoke('refresh-agents'),
   onAgentsUpdated: (cb) => ipcRenderer.on('agents-updated', (_e, agents) => cb(agents)),
+
+  // Agent test sandbox
+  agentTestVersion: (agentId) => ipcRenderer.invoke('agent-test-version', { agentId }),
+  agentTestSend: (agentId, model, message) => ipcRenderer.invoke('agent-test-send', { agentId, model, message }),
+  agentTestStop: () => ipcRenderer.invoke('agent-test-stop'),
+  onAgentTestOutput: (cb) => ipcRenderer.on('agent-test-output', (_e, data) => cb(data)),
+
+  // Agent detail (chat against a real PR/work item)
+  agentDetailPrepare: (target, agentId, model) => ipcRenderer.invoke('agent-detail-prepare', { target, agentId, model }),
+  agentDetailSend: (message) => ipcRenderer.invoke('agent-detail-send', { message }),
+  agentDetailStop: () => ipcRenderer.invoke('agent-detail-stop'),
+  agentDetailCleanup: () => ipcRenderer.invoke('agent-detail-cleanup'),
+  onAgentDetailOutput: (cb) => ipcRenderer.on('agent-detail-output', (_e, data) => cb(data)),
 
   // Settings
   getSettings: () => ipcRenderer.invoke('get-settings'),

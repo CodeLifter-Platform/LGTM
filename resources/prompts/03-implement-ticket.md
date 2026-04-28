@@ -13,7 +13,21 @@ The orchestrator has provided the following:
 - `DEFAULT_BRANCH`: the repository's default branch (typically `main` or `develop`)
 - `AUTHOR_IDENTITY`: the Azure DevOps identity you commit and post as
 
-Azure DevOps SDK clients are available for reading work items, posting comments to work items, creating branches, creating pull requests, and linking work items to PRs. Git is available for branching, committing, and pushing.
+## Azure DevOps access
+
+Use the Azure DevOps **REST API directly** for all work-item / PR operations:
+
+- Base URL: `https://dev.azure.com/{org}/{project}/_apis/...` (or `https://{org}.visualstudio.com/{project}/_apis/...` for legacy orgs)
+- Auth: PAT via `Authorization: Basic <base64(":${PAT}")>` (the PAT is available in the environment)
+- Common endpoints you'll need:
+  - Read work item: `GET /wit/workitems/{id}?$expand=all&api-version=7.1`
+  - Post a comment to a work item: `POST /wit/workItems/{id}/comments?api-version=7.1-preview.4`
+  - Create a PR: `POST /git/repositories/{repoId}/pullRequests?api-version=7.1` with `sourceRefName` / `targetRefName` / `title` / `description`
+  - Link a work item to a PR: `PATCH /wit/workitems/{id}?api-version=7.1` with a JSON-Patch `add` op on `/relations/-` referencing `ArtifactLink` of type `Pull Request` and `vstfs:///Git/PullRequestId/{project}%2F{repoId}%2F{prId}`
+
+**Do not use the Azure DevOps MCP server**, even if one is registered in your environment. Go straight to REST. The MCP wrapper has been unreliable for this workflow — direct REST calls are required.
+
+Git is available locally for branching, committing, and pushing.
 
 ## Your Task
 
@@ -28,7 +42,7 @@ You may produce a "partial success" PR (see Hard Constraints) if the work is lar
 
 ### 1. Read and understand the ticket
 
-Fetch the work item via the SDK. Read:
+Fetch the work item via the REST API (`GET /wit/workitems/{id}?$expand=all`). Read:
 
 - Title, description, acceptance criteria
 - All comments and discussion history
@@ -108,10 +122,10 @@ If your team has a different convention discoverable in the repo (CONTRIBUTING.m
 **Push and PR creation:**
 
 - Push the branch to origin.
-- Create a pull request via the SDK targeting the default branch. Required PR fields:
+- Create a pull request via the REST API (`POST /git/repositories/{repoId}/pullRequests`) targeting the default branch. Required PR fields:
   - **Title**: `<work item type>: <short description> (#<WORK_ITEM_ID>)` — e.g., `Bug: contract search null reference (#12345)`
   - **Description**: use the structure below
-  - **Linked work item**: link the work item to the PR via the SDK so it appears in the PR's "Work Items" tab
+  - **Linked work item**: link the work item to the PR via REST (`PATCH /wit/workitems/{id}` with the JSON-Patch ArtifactLink op described in "Azure DevOps access" above) so it appears in the PR's "Work Items" tab
   - **Reviewers**: do not auto-assign reviewers unless your team's policy is documented in the repo
 
 **PR description template:**

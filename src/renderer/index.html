@@ -79,6 +79,7 @@
       <button id="tab-tickets" class="tab" role="tab" aria-selected="false">
         Tickets <span id="tickets-tab-count" class="tab-count hidden">0</span>
       </button>
+      <button id="tab-test" class="tab" role="tab" aria-selected="false">Test</button>
     </div>
 
     <!-- Tab pane: PRs -->
@@ -124,6 +125,43 @@
       <div id="no-tickets" class="empty-state hidden">
         <p>No open tickets assigned to you.</p>
       </div>
+    </div>
+
+    <!-- Tab pane: Test (chat-like agent sandbox) -->
+    <div id="tab-pane-test" class="tab-pane hidden">
+      <!-- Top row: agent | model, 50/50 -->
+      <div class="test-top-row">
+        <select id="test-agent-select" class="agent-select test-top-select" title="Test agent"></select>
+        <select id="test-model-select" class="agent-select test-top-select" title="Test model"></select>
+      </div>
+
+      <div id="test-chat" class="test-chat">
+        <div id="test-chat-empty" class="test-chat-empty">
+          <p>Pick an agent and model, then click <strong>Start</strong>.</p>
+        </div>
+        <div id="test-chat-messages" class="test-chat-messages hidden"></div>
+      </div>
+
+      <!-- Composer: full-width textarea on top, two right-half buttons below -->
+      <form id="test-input-form" class="test-input-form">
+        <textarea
+          id="test-input"
+          class="test-input"
+          rows="2"
+          placeholder="Type a message — Enter to send, Shift+Enter for newline. Click Start first."
+          spellcheck="false"
+          disabled
+        ></textarea>
+        <div class="test-button-row">
+          <!-- Left half intentionally empty per design -->
+          <div class="test-button-spacer"></div>
+          <!-- Right half: Start/Restart on the left, Submit on the right -->
+          <div class="test-button-pair">
+            <button type="button" id="test-start-btn" class="btn-secondary btn-test-half">Start</button>
+            <button type="submit" id="test-send-btn" class="btn-primary btn-test-half" disabled>Submit</button>
+          </div>
+        </div>
+      </form>
     </div>
   </section>
 
@@ -188,6 +226,50 @@
       <div id="review-output" class="review-output"></div>
       <button id="rd-jump-bottom" class="rd-jump-bottom hidden" type="button">Jump to latest ↓</button>
     </details>
+  </section>
+
+  <!-- ─── Agent detail / chat view ─────────────────────────── -->
+  <section id="agent-detail-view" class="view hidden">
+    <div class="review-detail-header">
+      <button id="ad-back-btn" class="btn-icon" title="Back">←</button>
+      <div class="review-detail-info">
+        <span id="ad-title" class="review-detail-title"></span>
+        <span id="ad-meta" class="review-detail-meta"></span>
+      </div>
+    </div>
+
+    <!-- Top row: agent | model, 50/50 -->
+    <div class="test-top-row">
+      <select id="ad-agent-select" class="agent-select test-top-select" title="Agent"></select>
+      <select id="ad-model-select" class="agent-select test-top-select" title="Model"></select>
+    </div>
+
+    <div id="ad-chat" class="test-chat">
+      <div id="ad-chat-empty" class="test-chat-empty">
+        <div class="ad-loader" aria-hidden="true"></div>
+        <p>Loading prompt…</p>
+      </div>
+      <div id="ad-chat-messages" class="test-chat-messages hidden"></div>
+    </div>
+
+    <form id="ad-input-form" class="test-input-form">
+      <textarea
+        id="ad-input"
+        class="test-input"
+        rows="2"
+        placeholder="Click Start to run the prompt above. After it finishes, type follow-ups here."
+        spellcheck="false"
+        disabled
+      ></textarea>
+      <div class="test-button-row">
+        <div class="test-button-spacer"></div>
+        <div class="test-button-pair">
+          <!-- No Restart per request — just Start, which becomes Submit/Stop after first run -->
+          <div class="test-button-spacer"></div>
+          <button type="submit" id="ad-send-btn" class="btn-primary btn-test-half" disabled>Start</button>
+        </div>
+      </div>
+    </form>
   </section>
 
   <!-- ─── Settings panel ──────────────────────────────────── -->

@@ -447,6 +447,14 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.pr-title-link {
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+.pr-title-link:hover {
+  text-decoration: underline;
+}
 .pr-running-line {
   font-size: 11px;
   color: var(--accent);
@@ -571,8 +579,34 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .pr-mode-chip.resolve:hover {
   background: rgba(46, 204, 113, 0.18);
 }
+.pr-mode-chip.approved {
+  border: 1px solid rgba(155, 89, 182, 0.5);
+  color: #b288d9;
+  background: rgba(155, 89, 182, 0.10);
+}
+.pr-mode-chip.approved:hover {
+  background: rgba(155, 89, 182, 0.20);
+}
 
-/* ── Row reveal: Play + Dismiss ────────────────────────────────── */
+/* ── Row reveal: Details + Play + Dismiss ──────────────────── */
+.btn-details-row {
+  -webkit-app-region: no-drag;
+  background: transparent;
+  border: 1px solid rgba(243, 156, 18, 0.4);
+  color: var(--yellow);
+  font-size: 14px;
+  line-height: 1;
+  padding: 1px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, border-color 0.15s;
+}
+.btn-details-row:hover {
+  background: rgba(243, 156, 18, 0.15);
+  border-color: var(--yellow);
+}
+
 .btn-play-row {
   -webkit-app-region: no-drag;
   background: transparent;
@@ -594,8 +628,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-dismiss-row {
   -webkit-app-region: no-drag;
   background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text-dim);
+  border: 1px solid rgba(231, 76, 60, 0.35);
+  color: var(--red);
   font-size: 11px;
   line-height: 1;
   padding: 3px 7px;
@@ -605,9 +639,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
 .btn-dismiss-row:hover {
-  color: var(--text);
-  border-color: var(--text-dim);
-  background: rgba(136, 146, 164, 0.1);
+  background: rgba(231, 76, 60, 0.15);
+  border-color: var(--red);
 }
 
 .clickable-link {
@@ -1113,8 +1146,11 @@ hr {
   flex: 1 1 auto;
   margin: 0;
   padding: 12px 14px;
+  /* Always-dark code surface — pin the foreground so light-theme
+     users (where var(--text) is near-black) don't get an unreadable
+     black-on-black panel. */
   background: #0d1117;
-  color: var(--text);
+  color: #e6edf3;
   font-family: "SF Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
   font-size: 11px;
   line-height: 1.5;
@@ -1198,7 +1234,9 @@ hr {
 }
 .review-output pre code {
   background: transparent;
-  color: var(--text);
+  /* Same reasoning as .review-detail-prompt — the surrounding <pre>
+     is always-dark, so foreground must be explicitly light. */
+  color: #e6edf3;
   padding: 0;
   font-size: 12px;
   line-height: 1.5;
@@ -1594,4 +1632,181 @@ hr {
   border-color: var(--accent);
   background: rgba(76, 201, 240, 0.08);
   color: var(--accent);
+}
+
+/* ── Test chat tab ────────────────────────────────────────────── */
+.test-chat {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 14px 16px;
+  background: var(--bg);
+}
+.test-chat::-webkit-scrollbar { width: 5px; }
+.test-chat::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+.test-chat-empty {
+  margin: auto;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+.test-chat-empty p { margin: 0; }
+
+/* ── Detail-view loading spinner ─────────────────────────────────
+   Conic-gradient ring with a radial mask cuts out the center, giving
+   us a solid ring with a "comet trail" that fades. The whole thing
+   spins, which makes the trail chase its own tail — feels alive
+   without being distracting. */
+.ad-loader {
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 14px;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    rgba(76, 201, 240, 0)   0deg,
+    rgba(76, 201, 240, 0.15) 90deg,
+    rgba(76, 201, 240, 0.55) 270deg,
+    var(--accent)            359deg
+  );
+  /* Mask the inner circle out so we get a ring, not a disc. */
+  -webkit-mask: radial-gradient(circle at center,
+                  transparent 18px, #000 19px);
+          mask: radial-gradient(circle at center,
+                  transparent 18px, #000 19px);
+  animation: ad-loader-spin 1.1s cubic-bezier(0.4, 0.0, 0.2, 1) infinite;
+}
+@keyframes ad-loader-spin {
+  to { transform: rotate(360deg); }
+}
+.test-chat-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.test-msg {
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 88%;
+}
+/* User: right-aligned, mild green. No bubble — just text + alignment. */
+.test-msg.user {
+  align-self: flex-end;
+  text-align: right;
+  /* Slightly desaturated green so it reads as "mine" without shouting. */
+  color: #7fc59f;
+}
+/* Agent: left-aligned, soft grey. Streamed output appears here in real time. */
+.test-msg.agent {
+  align-self: flex-start;
+  text-align: left;
+  color: #a0a8b4;
+}
+.test-msg.system {
+  align-self: stretch;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-style: italic;
+  max-width: 100%;
+}
+.test-msg.error {
+  align-self: stretch;
+  text-align: left;
+  color: var(--red);
+  font-size: 12px;
+}
+/* Prompt: shown as the first message in the agent-detail chat. Light
+   blue, left-aligned, full readability. Pre-wrap so the assembled
+   prompt's newlines/indentation survive. */
+.test-msg.prompt {
+  align-self: stretch;
+  text-align: left;
+  max-width: 100%;
+  color: #9ec5fe;
+  white-space: pre-wrap;
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  padding: 6px 0;
+  border-left: 2px solid rgba(158, 197, 254, 0.3);
+  padding-left: 12px;
+}
+.test-msg .test-msg-pending {
+  /* Subtle "typing" hint while a response streams. */
+  color: var(--text-dim);
+  font-style: italic;
+}
+/* Top row: agent | model selectors, 50/50 split. */
+.test-top-row {
+  display: flex;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.test-top-select {
+  flex: 1 1 50%;
+  min-width: 0;
+}
+
+/* Composer: full-width textarea then a button row. The button row's
+   left half is intentionally empty; right half holds Start | Submit. */
+.test-input-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+.test-input {
+  width: 100%;
+  resize: none;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  min-width: 0;
+  /* Grows from 2 lines up to ~10; JS adjusts the height per keystroke
+     and overflow-y kicks in past max-height. */
+  min-height: 44px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.test-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.test-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.test-button-row {
+  display: flex;
+  gap: 8px;
+}
+.test-button-spacer {
+  flex: 1 1 50%;
+}
+.test-button-pair {
+  flex: 1 1 50%;
+  display: flex;
+  gap: 8px;
+}
+.btn-test-half {
+  flex: 1 1 50%;
+  font-size: 12px;
+  padding: 6px 12px;
+  -webkit-app-region: no-drag;
 }

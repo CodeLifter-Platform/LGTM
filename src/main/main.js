@@ -1,4 +1,7 @@
 const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, shell, dialog } = require('electron');
+const { spawn, execFile } = require('child_process');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { autoUpdater } = require('electron-updater');
 const { PatStore } = require('./pat-store');
@@ -96,6 +99,21 @@ app.whenReady().then(async () => {
   agentRegistry = new AgentRegistry();
   agentRunner = new AgentRunner(config);
 
+  // Load the saved PAT and wire up clients BEFORE creating the
+  // window. The renderer pulls PAT status via `get-pat-status` on
+  // boot; if we created the window first, there'd be a race where
+  // the renderer could invoke the IPC handler before currentPat
+  // was populated. Doing it first guarantees the answer is ready.
+  const existingPat = await patStore.get();
+  const orgUrl = config.get('orgUrl');
+  if (existingPat && orgUrl) {
+    currentPat = existingPat;
+    agentRunner.setCredentials(existingPat, DevOpsClient.parseOrgUrl(orgUrl).orgUrl);
+    initDevOps(existingPat, orgUrl).catch((err) => {
+      console.warn('[LGTM] initDevOps error (background):', err.message);
+    });
+  }
+
   createTray();
   createWindow();
   initAutoUpdater();
@@ -111,22 +129,15 @@ app.whenReady().then(async () => {
       }
     })
     .catch((err) => console.warn('[LGTM] Background model discovery failed:', err.message));
-
-  const existingPat = await patStore.get();
-  const orgUrl = config.get('orgUrl');
-  if (existingPat && orgUrl) {
-    currentPat = existingPat;
-    agentRunner.setCredentials(existingPat, DevOpsClient.parseOrgUrl(orgUrl).orgUrl);
-    mainWindow.webContents.once('did-finish-load', () => {
-      mainWindow.webContents.send('pat-status', { hasPat: true, orgUrl });
-    });
-    await initDevOps(existingPat, orgUrl);
-  } else {
-    mainWindow.webContents.once('did-finish-load', () => {
-      mainWindow.webContents.send('pat-status', { hasPat: false, orgUrl: '' });
-    });
-  }
 });
+
+// Renderer asks for PAT status as part of its own boot sequence —
+// guaranteed to arrive at a moment when the renderer is ready to
+// react to the answer.
+ipcMain.handle('get-pat-status', () => ({
+  hasPat: !!currentPat,
+  orgUrl: config.get('orgUrl') || '',
+}));
 
 app.on('window-all-closed', (e) => e.preventDefault());
 
@@ -165,14 +176,14 @@ function createTray() {
 // ── Window ───────────────────────────────────────────────────────────
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 480,
+    width: 960,
     height: 700,
     show: false,
     frame: false,
     resizable: true,
     skipTaskbar: true,
     alwaysOnTop: true,
-    minWidth: 380,
+    minWidth: 760,
     minHeight: 400,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -439,8 +450,19 @@ ipcMain.handle('save-log-file', async (_event, { key, suggestedName }) => {
 
 // ── IPC: Agents ──────────────────────────────────────────────────────
 
+// Strip non-serializable members (functions) before crossing the IPC
+// boundary. Electron's structured-clone serialization throws on any
+// function value, which silently rejects the renderer's promise and
+// leaves dropdowns/settings stuck. Drop everything that's a function
+// so adding new ones (next agent driver, etc.) doesn't relapse this.
 function serializeAgents(agentList) {
-  return agentList.map(({ buildCmd, ...rest }) => rest);
+  return agentList.map((agent) => {
+    const out = {};
+    for (const [k, v] of Object.entries(agent)) {
+      if (typeof v !== 'function') out[k] = v;
+    }
+    return out;
+  });
 }
 
 ipcMain.handle('get-agents', () => serializeAgents(agentRegistry.getAll()));
@@ -451,6 +473,499 @@ ipcMain.handle('refresh-agents', async () => {
   // returned list reflects what the dropdown will show.
   await agentRegistry.refreshModels();
   return serializeAgents(agentRegistry.getAll());
+});
+
+// ── IPC: Agent test sandbox ──────────────────────────────────────────
+//
+// Every user message spawns a fresh agent process in --print mode
+// with the message piped via stdin, but the spawn carries
+// agent-specific flags that pin it to a per-chat session so the
+// agent remembers prior turns:
+//
+//   claude → --session-id <uuid>     (first call creates the session,
+//                                     subsequent calls continue it)
+//   auggie → --continue              (after the first turn — picks
+//                                     the most recent session in
+//                                     this cwd, which we own)
+//
+// Each Start click resets: new tmpdir, new session UUID, first-turn
+// flag re-armed. Picking a different agent in the dropdown also
+// triggers a reset on the next Start.
+const { randomUUID } = require('crypto');
+
+let testProcess = null;     // the in-flight agent child, if any
+let testCwd = null;         // tmp dir owned by the current test session
+let testSessionId = null;   // UUID for Claude's --session-id; null otherwise
+let testFirstTurn = true;   // controls auggie's --continue
+let testAgentInUse = null;  // last agent id Started with — for change detection
+
+function buildTestSpawnEnv() {
+  const env = { ...process.env };
+  // Same scrub as agent-runner — keep node-shebang CLIs from auto-attaching
+  // to Electron's debugger when launched in dev mode.
+  delete env.NODE_OPTIONS;
+  delete env.ELECTRON_RUN_AS_NODE;
+  delete env.NODE_INSPECT;
+  delete env.NODE_INSPECT_RESUME_ON_START;
+  // Surface the PAT under common conventional names so prompts can
+  // authenticate REST calls without us templating the secret in.
+  // The detail-mode flow runs against real PRs and absolutely needs
+  // this; the test-mode "is the agent working" flow benefits too if
+  // the user asks the agent to ping ADO.
+  if (currentPat) {
+    env.AZURE_DEVOPS_PAT = currentPat;
+    env.AZURE_DEVOPS_EXT_PAT = currentPat;
+    env.SYSTEM_ACCESSTOKEN = currentPat;
+  }
+  return env;
+}
+
+/**
+ * Wipe any previous test sandbox and start fresh: new cwd, new
+ * session ID, first-turn flag re-armed. Called from Start.
+ */
+function resetTestSession(agentId) {
+  if (testCwd) {
+    try { fs.rmSync(testCwd, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+  testCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'lgtm-test-'));
+  testSessionId = (agentId === 'claude') ? randomUUID() : null;
+  testFirstTurn = true;
+  testAgentInUse = agentId;
+}
+
+/**
+ * Inject the agent-specific session-continuity flags on top of the
+ * args buildCommand handed back. Mutates a fresh array; doesn't touch
+ * the registry's defaults.
+ *
+ * Claude split: `--session-id <uuid>` CREATES a session with that ID
+ * and refuses if one already exists ("session ID is already in use").
+ * To continue, use `--resume <uuid>`. So turn 1 creates, turns 2+
+ * resume.
+ */
+function applySessionFlags(agentId, args) {
+  const out = [...args];
+  if (agentId === 'claude' && testSessionId) {
+    if (testFirstTurn) {
+      out.push('--session-id', testSessionId);
+    } else {
+      out.push('--resume', testSessionId);
+    }
+  } else if (agentId === 'augment' && !testFirstTurn) {
+    out.push('--continue');
+  }
+  return out;
+}
+
+ipcMain.handle('agent-test-version', async (_event, { agentId }) => {
+  const agent = agentRegistry.get(agentId);
+  if (!agent) return { success: false, error: `Unknown agent: ${agentId}` };
+  if (!agent.available) return { success: false, error: `${agent.name} is not installed.` };
+
+  // Pre-flight auth so the user gets the same actionable error as a real run.
+  if (typeof agent.authCheck === 'function') {
+    const auth = agent.authCheck();
+    if (!auth.ok) {
+      const msg = auth.hint ? `${auth.error} ${auth.hint}` : auth.error;
+      return { success: false, error: msg };
+    }
+  }
+
+  const bin = agentRegistry.getResolvedPath(agentId);
+  if (!bin) return { success: false, error: `Could not resolve binary for ${agentId}` };
+
+  // Start always resets: new tmpdir, new session UUID, first-turn flag re-armed.
+  resetTestSession(agentId);
+
+  return new Promise((resolve) => {
+    execFile(bin, ['--version'], { timeout: 5000, env: buildTestSpawnEnv() }, (err, stdout, stderr) => {
+      if (err) {
+        resolve({ success: false, error: `${bin} --version failed: ${err.message}`, stderr: (stderr || '').slice(-500) });
+        return;
+      }
+      const banner = (stdout || '').trim() || `${agent.name} ready.`;
+      resolve({
+        success: true,
+        bin,
+        banner,
+        cwd: testCwd,
+        sessionId: testSessionId, // null for non-Claude; UI can show it if non-null
+      });
+    });
+  });
+});
+
+ipcMain.handle('agent-test-send', async (event, { agentId, model, message }) => {
+  if (testProcess) {
+    return { success: false, error: 'Another message is already in flight. Press Stop first.' };
+  }
+  const agent = agentRegistry.get(agentId);
+  if (!agent || !agent.available) {
+    return { success: false, error: 'Agent unavailable' };
+  }
+  if (!testCwd || agentId !== testAgentInUse) {
+    return { success: false, error: 'Click Start before sending a message.' };
+  }
+
+  let command, args, stdinPrompt;
+  try {
+    ({ command, args, stdinPrompt } = agentRegistry.buildCommand(agentId, message, model));
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+
+  // Layer on session-continuity flags so the agent remembers prior turns
+  // in this chat. Claude pins a UUID; auggie uses --continue from turn 2 on.
+  const finalArgs = applySessionFlags(agentId, args);
+
+  const child = spawn(command, finalArgs, {
+    cwd: testCwd,
+    stdio: [stdinPrompt ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+    shell: false,
+    env: buildTestSpawnEnv(),
+  });
+  testProcess = child;
+
+  if (stdinPrompt && child.stdin) {
+    child.stdin.on('error', () => { /* EPIPE if agent dies before reading */ });
+    child.stdin.write(message);
+    child.stdin.end();
+  }
+
+  const send = (chunk) => {
+    if (event.sender && !event.sender.isDestroyed()) {
+      event.sender.send('agent-test-output', { chunk });
+    }
+  };
+  child.stdout.on('data', (d) => send(d.toString()));
+  child.stderr.on('data', (d) => send(d.toString()));
+
+  return new Promise((resolve) => {
+    child.on('close', (code, signal) => {
+      if (testProcess === child) testProcess = null;
+      // Mark first turn done only on a clean exit. If the call failed
+      // mid-init (no session got persisted), keep firstTurn=true so
+      // the next attempt doesn't try to --continue a session that
+      // doesn't exist.
+      if (code === 0) testFirstTurn = false;
+      resolve({
+        success: code === 0,
+        exitCode: code,
+        signal,
+      });
+    });
+    child.on('error', (err) => {
+      if (testProcess === child) testProcess = null;
+      resolve({ success: false, error: err.message });
+    });
+  });
+});
+
+ipcMain.handle('agent-test-stop', () => {
+  if (!testProcess) return { success: false, error: 'No agent running' };
+  try { testProcess.kill('SIGTERM'); } catch { /* ignore */ }
+  setTimeout(() => {
+    if (testProcess && testProcess.exitCode === null && !testProcess.killed) {
+      try { testProcess.kill('SIGKILL'); } catch { /* ignore */ }
+    }
+  }, 1500);
+  return { success: true };
+});
+
+// ── IPC: Agent Detail (chat against a real PR/work item) ──────────────
+//
+// Flow:
+//   1. Renderer calls `agent-detail-prepare`. Main clones the repo and
+//      assembles a prompt that's a simplified-but-realistic version of
+//      what the full scenario reviewer uses (LGTM rules + repo prompt
+//      + PR context). Returns the prompt for display.
+//   2. User reviews the prompt in the chat as the first message.
+//   3. User clicks Start → `agent-detail-send` spawns the agent with
+//      that prompt via stdin, in the cloned repo, threading
+//      `--session-id <uuid>` so follow-ups can resume.
+//   4. Subsequent messages → same handler with `isFirstTurn: false`,
+//      uses `--resume <uuid>` (claude) or `--continue` (auggie).
+//   5. Back button → `agent-detail-cleanup` kills any running child
+//      and wipes the clone.
+//
+// State is a singleton — one detail session at a time. Opening another
+// auto-cleans the previous.
+let detailRun = null;     // { agentId, model, clonePath, cleanup, sessionId, firstTurn, prompt, target }
+let detailProcess = null;
+
+async function cleanupDetailRun() {
+  if (detailProcess) {
+    try { detailProcess.kill('SIGTERM'); } catch { /* ignore */ }
+    setTimeout(() => {
+      if (detailProcess && detailProcess.exitCode === null && !detailProcess.killed) {
+        try { detailProcess.kill('SIGKILL'); } catch { /* ignore */ }
+      }
+    }, 1500);
+    detailProcess = null;
+  }
+  if (detailRun && typeof detailRun.cleanup === 'function') {
+    try { detailRun.cleanup(); } catch { /* ignore */ }
+  }
+  detailRun = null;
+}
+
+function loadUniversalReviewPrompt() {
+  const p1 = path.join(__dirname, '..', '..', 'resources', 'LGTM_REVIEW_PROMPT.md');
+  const p2 = path.join(process.resourcesPath || '', 'LGTM_REVIEW_PROMPT.md');
+  for (const p of [p1, p2]) {
+    try { return fs.readFileSync(p, 'utf8'); } catch { /* try next */ }
+  }
+  return '';
+}
+
+function loadRepoPromptIfAny(pr, clonePath) {
+  // PromptResolver lives on agentRunner; reuse it.
+  try {
+    const resolved = agentRunner.promptResolver.resolve(pr, clonePath);
+    if (resolved && resolved.path) {
+      return fs.readFileSync(resolved.path, 'utf8');
+    }
+  } catch { /* ignore */ }
+  return '';
+}
+
+function buildWorkItemDetailPrompt({ workItem, details, repoInfo, repoPrompt }) {
+  const stripHtml = (html) => (html || '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  const lines = [];
+  if (repoPrompt && repoPrompt.trim()) {
+    lines.push('# Repo-specific Rules', '', repoPrompt.trim(), '');
+  }
+  lines.push(`# ${details.type || workItem.type || 'Work Item'} #${details.id || workItem.id}`, '');
+  lines.push(`- Project: ${details.project || workItem.project}`);
+  lines.push(`- Repo: ${repoInfo.repo}`);
+  lines.push(`- Title: ${details.title || workItem.title || ''}`);
+  lines.push(`- State: ${details.state || ''}`);
+  if (details.priority != null) lines.push(`- Priority: ${details.priority}`);
+  if (details.severity) lines.push(`- Severity: ${details.severity}`);
+  if (details.tags) lines.push(`- Tags: ${details.tags}`);
+  if (workItem.webUrl) lines.push(`- URL: ${workItem.webUrl}`);
+
+  const desc = stripHtml(details.description);
+  if (desc) lines.push('', '## Description', '', desc);
+  const repro = stripHtml(details.reproSteps);
+  if (repro) lines.push('', '## Repro Steps', '', repro);
+  const sys = stripHtml(details.systemInfo);
+  if (sys) lines.push('', '## System Info', '', sys);
+  const ac = stripHtml(details.acceptanceCriteria);
+  if (ac) lines.push('', '## Acceptance Criteria', '', ac);
+
+  lines.push('', '# Task', '');
+  lines.push(
+    `Investigate this work item against the cloned repo. Read the relevant code, ` +
+    `propose a fix or implementation plan, and discuss with the user before making changes. ` +
+    `The user may follow up with questions — answer them based on the repo and work-item context.`,
+  );
+  return lines.join('\n');
+}
+
+function buildPrDetailPrompt({ pr, prDescription, universalPrompt, repoPrompt }) {
+  const sourceBranch = (pr.sourceBranch || '').replace(/^refs\/heads\//, '');
+  const targetBranch = (pr.targetBranch || '').replace(/^refs\/heads\//, '');
+  const lines = [];
+  if (universalPrompt.trim()) {
+    lines.push('# LGTM Review Rules', '', universalPrompt.trim(), '');
+  }
+  if (repoPrompt.trim()) {
+    lines.push('# Repo-specific Rules', '', repoPrompt.trim(), '');
+  }
+  lines.push('# Pull Request', '');
+  lines.push(`- Project: ${pr.project}`);
+  lines.push(`- Repo: ${pr.repo}`);
+  lines.push(`- PR ID: !${pr.id}`);
+  lines.push(`- Title: ${pr.title || ''}`);
+  lines.push(`- Author: ${pr.createdBy || ''}`);
+  lines.push(`- Source branch: ${sourceBranch}`);
+  lines.push(`- Target branch: ${targetBranch}`);
+  if (pr.webUrl) lines.push(`- URL: ${pr.webUrl}`);
+  if (prDescription && prDescription.trim()) {
+    lines.push('', '## Description', '', prDescription.trim());
+  }
+  lines.push('');
+  lines.push('# Task');
+  lines.push('');
+  lines.push(
+    `You are reviewing this PR interactively. Start by reading the diff between ` +
+    `\`${targetBranch}\` and \`${sourceBranch}\` (use \`git diff ${targetBranch}...${sourceBranch}\` ` +
+    `or read changed files directly). Apply the rules above, then summarize what you find. ` +
+    `The user may follow up with questions — answer them based on the repo and PR context.`,
+  );
+  return lines.join('\n');
+}
+
+ipcMain.handle('agent-detail-prepare', async (_event, { target, agentId, model }) => {
+  if (!agentRunner || !agentRunner.cloner) {
+    return { success: false, error: 'Not authenticated yet — set up your PAT first.' };
+  }
+  const agent = agentRegistry.get(agentId);
+  if (!agent) return { success: false, error: `Unknown agent: ${agentId}` };
+  if (!agent.available) return { success: false, error: `${agent.name} is not installed.` };
+  if (typeof agent.authCheck === 'function') {
+    const auth = agent.authCheck();
+    if (!auth.ok) {
+      return { success: false, error: auth.hint ? `${auth.error} ${auth.hint}` : auth.error };
+    }
+  }
+
+  // Replace any active detail session.
+  await cleanupDetailRun();
+
+  if (!target) {
+    return { success: false, error: 'No target supplied.' };
+  }
+
+  let clonePath, cleanup, prompt;
+  try {
+    if (target.kind === 'pr' && target.pr) {
+      const pr = target.pr;
+      const result = await agentRunner.cloner.clone(pr, {});
+      clonePath = result.clonePath;
+      cleanup = result.cleanup;
+
+      const universalPrompt = loadUniversalReviewPrompt();
+      const repoPrompt = loadRepoPromptIfAny(pr, clonePath);
+      let prDescription = '';
+      try {
+        const full = await agentRunner.devopsClient.getPullRequest(pr.project, pr.repoId, pr.id);
+        prDescription = full.description || '';
+      } catch (err) {
+        console.warn(`[LGTM] detail-prepare: could not fetch PR description: ${err.message}`);
+      }
+      prompt = buildPrDetailPrompt({ pr, prDescription, universalPrompt, repoPrompt });
+    } else if (target.kind === 'workItem' && target.workItem && target.repoInfo) {
+      const { workItem, repoInfo } = target;
+      const result = await agentRunner.cloner.cloneRepo(repoInfo.project, repoInfo.repo, workItem.id, {});
+      clonePath = result.clonePath;
+      cleanup = result.cleanup;
+
+      // Pull full work-item details for description/repro/etc.
+      let details = workItem;
+      try {
+        details = await agentRunner.devopsClient.getWorkItemDetails(workItem.id);
+      } catch (err) {
+        console.warn(`[LGTM] detail-prepare: could not fetch work item details: ${err.message}`);
+      }
+
+      // Optional per-repo prompt override (configured under bugs/tickets settings).
+      let repoPrompt = '';
+      if (target.promptFile) {
+        try {
+          repoPrompt = fs.readFileSync(path.join(clonePath, target.promptFile), 'utf8');
+        } catch (err) {
+          console.warn(`[LGTM] detail-prepare: could not read repo prompt ${target.promptFile}: ${err.message}`);
+        }
+      }
+      prompt = buildWorkItemDetailPrompt({ workItem, details, repoInfo, repoPrompt });
+    } else {
+      return { success: false, error: `Unsupported target kind: ${target.kind}` };
+    }
+  } catch (err) {
+    if (cleanup) { try { cleanup(); } catch { /* ignore */ } }
+    return { success: false, error: `Prepare failed: ${err.message}` };
+  }
+
+  detailRun = {
+    target,
+    agentId,
+    model,
+    clonePath,
+    cleanup,
+    sessionId: (agentId === 'claude') ? require('crypto').randomUUID() : null,
+    firstTurn: true,
+    prompt,
+  };
+
+  return { success: true, prompt, clonePath, sessionId: detailRun.sessionId };
+});
+
+ipcMain.handle('agent-detail-send', async (event, { message }) => {
+  if (!detailRun) return { success: false, error: 'No detail session prepared. Click Details first.' };
+  if (detailProcess) return { success: false, error: 'Another message is in flight.' };
+
+  const { agentId, model, clonePath } = detailRun;
+
+  let command, args, stdinPrompt;
+  try {
+    ({ command, args, stdinPrompt } = agentRegistry.buildCommand(agentId, message, model));
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+
+  // Layer on session-continuity flags. First turn for claude creates
+  // the session via --session-id; later turns resume. Auggie uses
+  // --continue from turn 2 onwards in the same cwd.
+  const finalArgs = [...args];
+  if (agentId === 'claude' && detailRun.sessionId) {
+    finalArgs.push(detailRun.firstTurn ? '--session-id' : '--resume', detailRun.sessionId);
+  } else if (agentId === 'augment' && !detailRun.firstTurn) {
+    finalArgs.push('--continue');
+  }
+
+  const child = spawn(command, finalArgs, {
+    cwd: clonePath,
+    stdio: [stdinPrompt ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+    shell: false,
+    env: buildTestSpawnEnv(),
+  });
+  detailProcess = child;
+
+  if (stdinPrompt && child.stdin) {
+    child.stdin.on('error', () => { /* EPIPE if agent dies first */ });
+    child.stdin.write(message);
+    child.stdin.end();
+  }
+
+  const send = (chunk) => {
+    if (event.sender && !event.sender.isDestroyed()) {
+      event.sender.send('agent-detail-output', { chunk });
+    }
+  };
+  child.stdout.on('data', (d) => send(d.toString()));
+  child.stderr.on('data', (d) => send(d.toString()));
+
+  return new Promise((resolve) => {
+    child.on('close', (code, signal) => {
+      if (detailProcess === child) detailProcess = null;
+      if (code === 0 && detailRun) detailRun.firstTurn = false;
+      resolve({ success: code === 0, exitCode: code, signal });
+    });
+    child.on('error', (err) => {
+      if (detailProcess === child) detailProcess = null;
+      resolve({ success: false, error: err.message });
+    });
+  });
+});
+
+ipcMain.handle('agent-detail-stop', () => {
+  if (!detailProcess) return { success: false, error: 'No agent running' };
+  try { detailProcess.kill('SIGTERM'); } catch { /* ignore */ }
+  setTimeout(() => {
+    if (detailProcess && detailProcess.exitCode === null && !detailProcess.killed) {
+      try { detailProcess.kill('SIGKILL'); } catch { /* ignore */ }
+    }
+  }, 1500);
+  return { success: true };
+});
+
+ipcMain.handle('agent-detail-cleanup', async () => {
+  await cleanupDetailRun();
+  return { success: true };
 });
 
 // ── IPC: Settings ────────────────────────────────────────────────────

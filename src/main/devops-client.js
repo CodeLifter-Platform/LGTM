@@ -15,6 +15,7 @@ const path = require('path');
 const azdev = require('azure-devops-node-api');
 const gitInterfaces = require('azure-devops-node-api/interfaces/GitInterfaces');
 const witInterfaces = require('azure-devops-node-api/interfaces/WorkItemTrackingInterfaces');
+const policyInterfaces = require('azure-devops-node-api/interfaces/PolicyInterfaces');
 
 // Helpers
 const toIso = (d) => {
@@ -41,13 +42,15 @@ class DevOpsClient {
     this._git = null;
     this._wit = null;
     this._loc = null;
+    this._policy = null;
     this._fileTreeCache = null;
   }
 
-  async _getCore() { return this._core || (this._core = await this.conn.getCoreApi()); }
-  async _getGit()  { return this._git  || (this._git  = await this.conn.getGitApi()); }
-  async _getWit()  { return this._wit  || (this._wit  = await this.conn.getWorkItemTrackingApi()); }
-  async _getLoc()  { return this._loc  || (this._loc  = await this.conn.getLocationsApi()); }
+  async _getCore()   { return this._core   || (this._core   = await this.conn.getCoreApi()); }
+  async _getGit()    { return this._git    || (this._git    = await this.conn.getGitApi()); }
+  async _getWit()    { return this._wit    || (this._wit    = await this.conn.getWorkItemTrackingApi()); }
+  async _getLoc()    { return this._loc    || (this._loc    = await this.conn.getLocationsApi()); }
+  async _getPolicy() { return this._policy || (this._policy = await this.conn.getPolicyApi()); }
 
   /**
    * Parse a user-provided URL into org base URL + optional project.
@@ -170,8 +173,10 @@ class DevOpsClient {
             { status: gitInterfaces.PullRequestStatus.Active },
             project.name,
           );
-          for (const pr of prs || []) {
-            allPrs.push({
+          // Fetch policy evaluations in parallel to avoid serial latency.
+          const enriched = await Promise.all((prs || []).map(async (pr) => {
+            const isApproved = await this._isPassingAllPolicies(project.id, pr.pullRequestId);
+            return {
               id: pr.pullRequestId,
               title: pr.title,
               status: 'active',                                  // mirrors old shape
@@ -185,8 +190,10 @@ class DevOpsClient {
               url: pr.url,
               webUrl: `${this.orgUrl}/${encodeURIComponent(project.name)}/_git/${encodeURIComponent(repo.name)}/pullrequest/${pr.pullRequestId}`,
               reviewStatus: this._reviewStatus(pr),
-            });
-          }
+              isApproved,
+            };
+          }));
+          allPrs.push(...enriched);
         } catch (err) {
           console.error(`[LGTM] Failed to list PRs for ${project.name}/${repo.name}: ${err.message}`);
         }
@@ -545,6 +552,38 @@ class DevOpsClient {
     if (hasWait) return 'waiting';
     if (allApproved) return 'approved';
     return 'pending';
+  }
+
+  /**
+   * True iff every enabled, blocking branch policy on this PR has
+   * status === Approved (2). NotApplicable / disabled / non-blocking
+   * policies are ignored. Returns false on any error so we never
+   * over-promise readiness.
+   *
+   * Uses the policy GUID artifactId format:
+   *   vstfs:///CodeReview/CodeReviewId/{projectId}/{prId}
+   */
+  async _isPassingAllPolicies(projectId, prId) {
+    try {
+      const policy = await this._getPolicy();
+      const artifactId = `vstfs:///CodeReview/CodeReviewId/${projectId}/${prId}`;
+      const evals = await policy.getPolicyEvaluations(projectId, artifactId, false);
+      if (!evals || evals.length === 0) return false;
+      const Approved = policyInterfaces.PolicyEvaluationStatus.Approved;
+      let blockingCount = 0;
+      for (const ev of evals) {
+        const cfg = ev.configuration || {};
+        const enabled = cfg.isEnabled !== false;
+        const blocking = cfg.isBlocking !== false;
+        if (!enabled || !blocking) continue;
+        blockingCount += 1;
+        if (ev.status !== Approved) return false;
+      }
+      return blockingCount > 0;
+    } catch (err) {
+      console.error(`[LGTM] Failed to fetch policy evaluations for PR ${prId}: ${err.message}`);
+      return false;
+    }
   }
 }
 

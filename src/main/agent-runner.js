@@ -39,13 +39,26 @@ function formatIdentity(user) {
  * friends, which then leak into any node-shebang CLI we spawn (e.g.
  * auggie), making it print "Debugger listening on ws://..." and attach
  * a debugger to itself. Harmless but noisy in the detail panel.
+ *
+ * If a PAT is provided, surface it under common env-var names the
+ * agent prompts reference so REST calls to Azure DevOps can authenticate
+ * without us having to template the secret into the prompt body.
  */
-function buildSpawnEnv() {
+function buildSpawnEnv(pat) {
   const env = { ...process.env };
   delete env.NODE_OPTIONS;
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.NODE_INSPECT;
   delete env.NODE_INSPECT_RESUME_ON_START;
+  if (pat) {
+    // Multiple names cover common conventions: AZURE_DEVOPS_PAT (our
+    // prompts), AZURE_DEVOPS_EXT_PAT (az-cli ext), SYSTEM_ACCESSTOKEN
+    // (matches ADO Pipelines so prompts copy-pasted from CI examples
+    // also work).
+    env.AZURE_DEVOPS_PAT = pat;
+    env.AZURE_DEVOPS_EXT_PAT = pat;
+    env.SYSTEM_ACCESSTOKEN = pat;
+  }
   return env;
 }
 
@@ -442,7 +455,7 @@ class AgentRunner {
         cwd: clonePath,
         stdio: [stdinPrompt ? 'pipe' : 'ignore', 'pipe', 'pipe'],
         shell: false,
-        env: buildSpawnEnv(),
+        env: buildSpawnEnv(this.cloner && this.cloner.pat),
       });
       review.child = child;
 
@@ -705,7 +718,7 @@ class AgentRunner {
         cwd: clonePath,
         stdio: [stdinPrompt ? 'pipe' : 'ignore', 'pipe', 'pipe'],
         shell: false,
-        env: buildSpawnEnv(),
+        env: buildSpawnEnv(this.cloner && this.cloner.pat),
       });
       review.child = child;
 

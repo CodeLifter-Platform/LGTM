@@ -9,6 +9,7 @@ const patSetup          = $('#pat-setup');
 const prListView        = $('#pr-list-view');
 const settingsView      = $('#settings-view');
 const reviewDetailView  = $('#review-detail-view');
+const agentDetailView   = $('#agent-detail-view');
 
 const orgUrlInput   = $('#org-url');
 const patInput      = $('#pat-input');
@@ -25,9 +26,11 @@ const agentSelect   = $('#agent-select');
 const tabPrsBtn     = $('#tab-prs');
 const tabBugsBtn    = $('#tab-bugs');
 const tabTicketsBtn = $('#tab-tickets');
+const tabTestBtn    = $('#tab-test');
 const tabPanePrs    = $('#tab-pane-prs');
 const tabPaneBugs   = $('#tab-pane-bugs');
 const tabPaneTickets = $('#tab-pane-tickets');
+const tabPaneTest    = $('#tab-pane-test');
 const bugsTabCount  = $('#bugs-tab-count');
 const ticketsTabCount = $('#tickets-tab-count');
 
@@ -138,11 +141,18 @@ function savePrModes() {
   try { localStorage.setItem('lgtm-pr-modes', JSON.stringify(prModeOverrides)); } catch { /* ignore */ }
 }
 
-function defaultPrMode(pr) {
+// Author-based default — used when the PR isn't approved AND the user
+// hasn't set an override. Author → resolve; everyone else → review.
+function authorDefaultMode(pr) {
   if (currentUser && pr.createdBy && pr.createdBy === currentUser.displayName) {
     return 'resolve';
   }
   return 'review';
+}
+
+function defaultPrMode(pr) {
+  if (pr.isApproved) return 'approved';
+  return authorDefaultMode(pr);
 }
 
 function getPrMode(pr) {
@@ -150,10 +160,26 @@ function getPrMode(pr) {
   return prModeOverrides[key] || defaultPrMode(pr);
 }
 
+// Click cycle:
+//   approved-PR (no override): approved → review → resolve → approved
+//   non-approved PR:           review ↔ resolve
+// Going back to "approved" is achieved by clearing the override so
+// defaultPrMode kicks in again.
 function togglePrMode(pr) {
   const key = `${pr.project}/${pr.repo}/${pr.id}`;
   const current = getPrMode(pr);
-  prModeOverrides[key] = current === 'review' ? 'resolve' : 'review';
+
+  if (pr.isApproved) {
+    if (current === 'approved') {
+      prModeOverrides[key] = 'review';
+    } else if (current === 'review') {
+      prModeOverrides[key] = 'resolve';
+    } else {
+      delete prModeOverrides[key];
+    }
+  } else {
+    prModeOverrides[key] = current === 'review' ? 'resolve' : 'review';
+  }
   savePrModes();
 }
 
@@ -183,7 +209,7 @@ applyThemeIcon();
 
 // ── Navigation ───────────────────────────────────────────────────
 function showView(view) {
-  [patSetup, prListView, settingsView, reviewDetailView, bugsSettingsView, ticketsSettingsView]
+  [patSetup, prListView, settingsView, reviewDetailView, agentDetailView, bugsSettingsView, ticketsSettingsView]
     .forEach((v) => v.classList.add('hidden'));
   view.classList.remove('hidden');
 }
@@ -456,10 +482,18 @@ function renderPrList(prs) {
         info.className = 'pr-info';
         const showRunning = reviewStatus === 'running' || reviewStatus === 'cloning';
         info.innerHTML = `
-          <div class="pr-path">#${pr.id} ${esc(pr.title)}</div>
+          <div class="pr-path"><a class="pr-title-link" href="#" title="Open PR in browser">#${pr.id} ${esc(pr.title)}</a></div>
           <div class="pr-title">by ${esc(pr.createdBy)} · ${ageStr}</div>
           ${showRunning ? `<div class="pr-running-line" data-running-key="${esc(key)}">${esc(statusLineFor(key))}</div>` : ''}
         `;
+        const prTitleLink = info.querySelector('.pr-title-link');
+        if (prTitleLink) {
+          prTitleLink.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (pr.webUrl) window.lgtm.openExternal(pr.webUrl);
+          });
+        }
 
         // Badge + view button for active reviews
         const actions = document.createElement('div');
@@ -521,9 +555,11 @@ function renderPrList(prs) {
           const modeChip = document.createElement('button');
           modeChip.className = `pr-mode-chip ${mode}`;
           modeChip.textContent = mode;
-          modeChip.title = mode === 'resolve'
-            ? 'Resolve mode: address review comments and push back. Click to switch to review.'
-            : 'Review mode: post review comments. Click to switch to resolve.';
+          modeChip.title = mode === 'approved'
+            ? 'Approved: passing all branch policies. Click to switch to review.'
+            : mode === 'resolve'
+              ? 'Resolve mode: address review comments and push back. Click to switch to review.'
+              : 'Review mode: post review comments. Click to switch to resolve.';
           modeChip.addEventListener('click', (e) => {
             e.stopPropagation();
             togglePrMode(pr);
@@ -532,9 +568,28 @@ function renderPrList(prs) {
           actions.appendChild(modeChip);
         }
 
+        // Details: always visible. Independent of reveal/review state —
+        // opens the chat-style preview where the user can read the
+        // prompt and decide whether to start the agent.
+        if (!reviewStatus) {
+          const detailsBtn = document.createElement('button');
+          detailsBtn.className = 'btn-details-row';
+          detailsBtn.textContent = '⋯';
+          detailsBtn.title = 'Open in chat — preview prompt before running';
+          detailsBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            revealedRows.delete(key);
+            openAgentDetail({ kind: 'pr', pr });
+          });
+          actions.appendChild(detailsBtn);
+        }
+
         if (!reviewStatus && revealedRows.has(key)) {
           // Reveal state: Play + dismiss
-          const mode = getPrMode(pr);
+          const chipMode = getPrMode(pr);
+          // Effective action: 'approved' falls back to the author-based
+          // default, matching what startReview() will dispatch.
+          const mode = chipMode === 'approved' ? authorDefaultMode(pr) : chipMode;
           const playBtn = document.createElement('button');
           playBtn.className = 'btn-play-row';
           playBtn.textContent = '▶';  // ▶
@@ -789,7 +844,10 @@ async function startReview(pr) {
 
   const agentId = selectedAgent || 'claude';
   const model = agentModels[agentId] || null;
-  const mode = getPrMode(pr);
+  // 'approved' is informational — pressing play falls back to the
+  // author-based default action so the agent has something to do.
+  const chipMode = getPrMode(pr);
+  const mode = chipMode === 'approved' ? authorDefaultMode(pr) : chipMode;
 
   // Optimistically show cloning state
   reviewStatuses[key] = { status: 'cloning', agentId, output: '' };
@@ -1320,6 +1378,7 @@ function setActiveTab(tab) {
     { key: 'prs',     btn: tabPrsBtn,     pane: tabPanePrs },
     { key: 'bugs',    btn: tabBugsBtn,    pane: tabPaneBugs },
     { key: 'tickets', btn: tabTicketsBtn, pane: tabPaneTickets },
+    { key: 'test',    btn: tabTestBtn,    pane: tabPaneTest },
   ];
   tabs.forEach(({ key, btn, pane }) => {
     const active = key === tab;
@@ -1341,6 +1400,10 @@ function setActiveTab(tab) {
 tabPrsBtn.addEventListener('click', () => setActiveTab('prs'));
 tabBugsBtn.addEventListener('click', () => setActiveTab('bugs'));
 tabTicketsBtn.addEventListener('click', () => setActiveTab('tickets'));
+tabTestBtn.addEventListener('click', () => {
+  setActiveTab('test');
+  populateTestAgentSelect();
+});
 
 // ── Bugs: render & refresh ───────────────────────────────────────
 function renderBugList(bugs) {
@@ -1465,10 +1528,18 @@ function renderWorkItemRow(container, wi, typeLabel) {
   info.className = 'pr-info';
   const showRunning = reviewStatus === 'running' || reviewStatus === 'cloning';
   info.innerHTML = `
-    <div class="pr-path">#${wi.id} ${esc(wi.title)}</div>
+    <div class="pr-path"><a class="pr-title-link" href="#" title="Open work item in browser">#${wi.id} ${esc(wi.title)}</a></div>
     <div class="pr-title">${meta}</div>
     ${showRunning && runtimeKey ? `<div class="pr-running-line" data-running-key="${esc(runtimeKey)}">${esc(statusLineFor(runtimeKey))}</div>` : ''}
   `;
+  const wiTitleLink = info.querySelector('.pr-title-link');
+  if (wiTitleLink) {
+    wiTitleLink.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (wi.webUrl) window.lgtm.openExternal(wi.webUrl);
+    });
+  }
 
   const actions = document.createElement('div');
   actions.className = 'pr-actions';
@@ -1523,27 +1594,42 @@ function renderWorkItemRow(container, wi, typeLabel) {
       });
       actions.appendChild(viewBtn);
     }
-  } else if (revealedRows.has(revealKey)) {
-    const playBtn = document.createElement('button');
-    playBtn.className = 'btn-play-row';
-    playBtn.textContent = '▶';
-    playBtn.title = 'Start agent';
-    playBtn.addEventListener('click', (e) => {
+  } else {
+    // Details: always visible. Clicking opens the repo picker in
+    // 'details' mode, which routes to the chat preview after the
+    // user picks a repo.
+    const detailsBtn = document.createElement('button');
+    detailsBtn.className = 'btn-details-row';
+    detailsBtn.textContent = '⋯';
+    detailsBtn.title = 'Open in chat — pick a repo, preview prompt before running';
+    detailsBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      openRepoPickerForWorkItem(wi, playBtn);
+      openRepoPickerForWorkItem(wi, detailsBtn, { purpose: 'details' });
     });
-    actions.appendChild(playBtn);
+    actions.appendChild(detailsBtn);
 
-    const dismissBtn = document.createElement('button');
-    dismissBtn.className = 'btn-dismiss-row';
-    dismissBtn.textContent = '✕';
-    dismissBtn.title = 'Cancel';
-    dismissBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      revealedRows.delete(revealKey);
-      rerenderActiveWorkItemList();
-    });
-    actions.appendChild(dismissBtn);
+    if (revealedRows.has(revealKey)) {
+      const playBtn = document.createElement('button');
+      playBtn.className = 'btn-play-row';
+      playBtn.textContent = '▶';
+      playBtn.title = 'Start agent';
+      playBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openRepoPickerForWorkItem(wi, playBtn);
+      });
+      actions.appendChild(playBtn);
+
+      const dismissBtn = document.createElement('button');
+      dismissBtn.className = 'btn-dismiss-row';
+      dismissBtn.textContent = '✕';
+      dismissBtn.title = 'Cancel';
+      dismissBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        revealedRows.delete(revealKey);
+        rerenderActiveWorkItemList();
+      });
+      actions.appendChild(dismissBtn);
+    }
   }
 
   row.appendChild(priEl);
@@ -1586,7 +1672,18 @@ function rerenderActiveWorkItemList() {
 // ── Repo picker popover (for work-item agent actions) ────────────
 let openRepoPicker = null;
 
-async function openRepoPickerForWorkItem(wi, anchorEl) {
+/**
+ * Open the repo picker for a work item.
+ *
+ * @param {Object} wi          Work item.
+ * @param {HTMLElement} anchorEl Anchor for popover positioning.
+ * @param {Object} [opts]
+ * @param {string} [opts.purpose='start']  'start' to dispatch the agent
+ *                                         (default), 'details' to open
+ *                                         the chat-style preview view.
+ */
+async function openRepoPickerForWorkItem(wi, anchorEl, opts = {}) {
+  const purpose = opts.purpose || 'start';
   closeRepoPicker();
 
   const popover = document.createElement('div');
@@ -1661,7 +1758,7 @@ async function openRepoPickerForWorkItem(wi, anchorEl) {
 
   const goBtn = document.createElement('button');
   goBtn.className = 'popover-save-btn';
-  goBtn.textContent = 'Start';
+  goBtn.textContent = purpose === 'details' ? 'Open' : 'Start';
   goBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
     const repoName = select.value;
@@ -1678,8 +1775,21 @@ async function openRepoPickerForWorkItem(wi, anchorEl) {
     const repoKey = `${wi.project}/${repoName}`;
     const promptFile = tabRepoCfgs[repoKey] || '';
 
-    // Optimistic local state
     lastUsedRepos[wi.project] = repoName;
+
+    // 'details' purpose: skip the optimistic dispatch state machinery
+    // and instead route to the chat-style preview view. The detail
+    // flow has its own clone-and-prep IPC and doesn't share state
+    // with the async startWorkItemAction path.
+    if (purpose === 'details') {
+      revealedRows.delete(`wi-${wi.project}-${wi.id}`);
+      closeRepoPicker();
+      rerenderActiveWorkItemList();
+      openAgentDetail({ kind: 'workItem', workItem: wi, repoInfo, agentId, model, promptFile });
+      return;
+    }
+
+    // Optimistic local state for the dispatch path.
     const optimisticKey = `${wi.project}/${repoName}/wi-${wi.id}`;
     reviewStatuses[optimisticKey] = {
       status: 'cloning',
@@ -2410,6 +2520,7 @@ window.lgtm.onAgentsUpdated((updated) => {
   agents = updated;
   renderAgentSelect();
   renderTabAgentSelects();
+  if (typeof populateTestAgentSelect === 'function') populateTestAgentSelect();
 });
 
 window.lgtm.onCurrentUser((u) => {
@@ -2417,33 +2528,45 @@ window.lgtm.onCurrentUser((u) => {
   if (currentPrs.length) renderPrList(currentPrs);
 });
 
-window.lgtm.onPatStatus(async (status) => {
-  if (status.hasPat) {
-    await loadAgents();
-    // Pull current user — main may have already cached it.
-    try {
-      const u = await window.lgtm.getMe();
-      if (u) currentUser = u;
-    } catch { /* ignore */ }
-    showView(prListView);
-    subtitleEl.textContent = (status.orgUrl || '').replace('https://dev.azure.com/', '');
-    // Background-prefetch bugs so the tab badge populates without a click.
-    if (!bugsLoaded) {
-      bugsLoaded = true;
-      window.lgtm.refreshBugs().then((result) => {
-        if (result && result.success) renderBugList(result.bugs);
-      }).catch(() => {});
-    }
-    if (!ticketsLoaded) {
-      ticketsLoaded = true;
-      window.lgtm.refreshWorkItems().then((result) => {
-        if (result && result.success) renderTicketList(result.items);
-      }).catch(() => {});
-    }
-  } else {
+// Pull initial PAT status on renderer boot. Pull (vs main pushing
+// `pat-status`) is race-proof: the renderer asks when it's ready,
+// instead of main hoping `did-finish-load` hasn't fired yet.
+async function bootFromPatStatus() {
+  let status;
+  try {
+    status = await window.lgtm.getPatStatus();
+  } catch (err) {
+    console.warn('[LGTM] getPatStatus failed:', err.message);
     showView(patSetup);
+    return;
   }
-});
+
+  if (!status || !status.hasPat) {
+    showView(patSetup);
+    return;
+  }
+
+  try { await loadAgents(); } catch (err) { console.warn('[LGTM] loadAgents:', err.message); }
+  try {
+    const u = await window.lgtm.getMe();
+    if (u) currentUser = u;
+  } catch { /* ignore */ }
+  showView(prListView);
+  subtitleEl.textContent = (status.orgUrl || '').replace('https://dev.azure.com/', '');
+  if (!bugsLoaded) {
+    bugsLoaded = true;
+    window.lgtm.refreshBugs().then((result) => {
+      if (result && result.success) renderBugList(result.bugs);
+    }).catch(() => {});
+  }
+  if (!ticketsLoaded) {
+    ticketsLoaded = true;
+    window.lgtm.refreshWorkItems().then((result) => {
+      if (result && result.success) renderTicketList(result.items);
+    }).catch(() => {});
+  }
+}
+bootFromPatStatus();
 
 window.lgtm.onReviewUpdate((data) => {
   if (!reviewStatuses[data.key]) reviewStatuses[data.key] = { output: '' };
@@ -2602,3 +2725,443 @@ function updateRunningLineEls(key) {
     if (el.dataset.runningKey === key) el.textContent = text;
   });
 }
+
+// ── Test chat tab ────────────────────────────────────────────────
+const testAgentSelect  = $('#test-agent-select');
+const testModelSelect  = $('#test-model-select');
+const testStartBtn     = $('#test-start-btn');
+const testChat         = $('#test-chat');
+const testChatEmpty    = $('#test-chat-empty');
+const testChatMessages = $('#test-chat-messages');
+const testInputForm    = $('#test-input-form');
+const testInput        = $('#test-input');
+const testSendBtn      = $('#test-send-btn');
+
+let testStarted = false;
+let testRunning = false;       // a send is in flight (Submit toggles to Stop)
+let testCurrentAgentEl = null; // streaming target for the in-flight agent reply
+
+function populateTestAgentSelect() {
+  if (!testAgentSelect) return;
+  const prev = testAgentSelect.value;
+  testAgentSelect.innerHTML = '';
+  (agents || []).forEach((agent) => {
+    const opt = document.createElement('option');
+    opt.value = agent.id;
+    opt.textContent = agent.name + (agent.available ? '' : ' (not installed)');
+    opt.disabled = !agent.available;
+    testAgentSelect.appendChild(opt);
+  });
+  if (prev && [...testAgentSelect.options].some((o) => o.value === prev)) {
+    testAgentSelect.value = prev;
+  } else if (selectedAgent) {
+    testAgentSelect.value = selectedAgent;
+  }
+  populateTestModelSelect();
+}
+
+function populateTestModelSelect() {
+  if (!testModelSelect) return;
+  const agentId = testAgentSelect && testAgentSelect.value;
+  const agent = (agents || []).find((a) => a.id === agentId);
+  const prev = testModelSelect.value;
+  testModelSelect.innerHTML = '';
+  const models = (agent && agent.models) || [];
+  if (models.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '(no models)';
+    opt.disabled = true;
+    testModelSelect.appendChild(opt);
+    return;
+  }
+  models.forEach((m) => {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = m.label || m.id;
+    testModelSelect.appendChild(opt);
+  });
+  // Prefer last selection, then user's saved per-agent default, then first.
+  if (prev && [...testModelSelect.options].some((o) => o.value === prev)) {
+    testModelSelect.value = prev;
+  } else if (agentModels && agentModels[agentId]
+             && [...testModelSelect.options].some((o) => o.value === agentModels[agentId])) {
+    testModelSelect.value = agentModels[agentId];
+  }
+}
+
+function appendTestMsg(role, text) {
+  testChatEmpty.classList.add('hidden');
+  testChatMessages.classList.remove('hidden');
+  const div = document.createElement('div');
+  div.className = `test-msg ${role}`;
+  div.textContent = text;
+  testChatMessages.appendChild(div);
+  testChat.scrollTop = testChat.scrollHeight;
+  return div;
+}
+
+function setTestRunning(running) {
+  testRunning = running;
+  testInput.disabled = !testStarted;
+  // Submit stays enabled once Started — its label flips to Stop while
+  // a send is in flight, and the submit handler treats a click as
+  // either "send the message" or "kill the process" based on state.
+  testSendBtn.disabled = !testStarted;
+  testSendBtn.textContent = running ? 'Stop' : 'Submit';
+  testSendBtn.classList.toggle('btn-primary', !running);
+  testSendBtn.classList.toggle('btn-secondary', running);
+  testAgentSelect.disabled = running;
+  testModelSelect.disabled = running;
+  testStartBtn.disabled = running;
+}
+
+/**
+ * Auto-grow the textarea up to its CSS max-height, then let
+ * overflow-y kick in. Reset to auto first so it can shrink as the
+ * user deletes lines.
+ */
+function autoSizeTestInput() {
+  if (!testInput) return;
+  testInput.style.height = 'auto';
+  testInput.style.height = Math.min(testInput.scrollHeight, 220) + 'px';
+}
+
+testAgentSelect && testAgentSelect.addEventListener('change', () => {
+  populateTestModelSelect();
+});
+
+testStartBtn && testStartBtn.addEventListener('click', async () => {
+  const agentId = testAgentSelect.value;
+  if (!agentId) {
+    appendTestMsg('error', 'Pick an agent first.');
+    return;
+  }
+  testStartBtn.disabled = true;
+  testStartBtn.textContent = 'Starting…';
+  // Reset visible chat each time Start is pressed.
+  testChatMessages.innerHTML = '';
+  testChatMessages.classList.remove('hidden');
+  testChatEmpty.classList.add('hidden');
+
+  const result = await window.lgtm.agentTestVersion(agentId);
+  testStartBtn.textContent = 'Restart';
+  testStartBtn.disabled = false;
+
+  if (!result.success) {
+    appendTestMsg('error', result.error);
+    testStarted = false;
+    setTestRunning(false);
+    return;
+  }
+  testStarted = true;
+  // Surface the session ID so it's obvious this is a multi-turn chat.
+  const sessionLine = result.sessionId
+    ? `\nsession: ${result.sessionId.slice(0, 8)}…`
+    : '\nsession: per-cwd (--continue)';
+  appendTestMsg('system', `${result.banner}\n${result.bin}\ncwd: ${result.cwd}${sessionLine}`);
+  setTestRunning(false);
+  testInput.focus();
+});
+
+testInputForm && testInputForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  // While running, Submit is acting as Stop — kill the in-flight process.
+  if (testRunning) {
+    window.lgtm.agentTestStop().catch(() => {});
+    return;
+  }
+  if (!testStarted) return;
+  const message = testInput.value.trim();
+  if (!message) return;
+
+  const agentId = testAgentSelect.value;
+  const model = testModelSelect.value || (agentModels && agentModels[agentId]) || null;
+
+  appendTestMsg('user', message);
+  testInput.value = '';
+  autoSizeTestInput();
+  // New empty agent bubble we'll fill via streaming chunks.
+  testCurrentAgentEl = appendTestMsg('agent', '');
+  const placeholder = document.createElement('span');
+  placeholder.className = 'test-msg-pending';
+  placeholder.textContent = '…';
+  testCurrentAgentEl.appendChild(placeholder);
+
+  setTestRunning(true);
+  let result;
+  try {
+    result = await window.lgtm.agentTestSend(agentId, model, message);
+  } catch (err) {
+    result = { success: false, error: err.message };
+  }
+  setTestRunning(false);
+
+  const stillPending = testCurrentAgentEl && testCurrentAgentEl.querySelector('.test-msg-pending');
+  if (stillPending) stillPending.remove();
+
+  if (!result.success) {
+    if (testCurrentAgentEl && !testCurrentAgentEl.textContent.trim()) {
+      testCurrentAgentEl.remove();
+    }
+    appendTestMsg('error', result.error || `Agent exited ${result.exitCode}${result.signal ? ` (${result.signal})` : ''}`);
+  } else if (testCurrentAgentEl && !testCurrentAgentEl.textContent.trim()) {
+    testCurrentAgentEl.textContent = '(no output)';
+  }
+  testCurrentAgentEl = null;
+  testInput.focus();
+});
+
+// Enter sends; Shift+Enter inserts newline.
+testInput && testInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    testInputForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  }
+});
+// Auto-grow as the user types.
+testInput && testInput.addEventListener('input', autoSizeTestInput);
+
+window.lgtm.onAgentTestOutput((data) => {
+  if (!testCurrentAgentEl || !data || typeof data.chunk !== 'string') return;
+  const pending = testCurrentAgentEl.querySelector('.test-msg-pending');
+  if (pending) pending.remove();
+  testCurrentAgentEl.appendChild(document.createTextNode(data.chunk));
+  testChat.scrollTop = testChat.scrollHeight;
+});
+
+// ── Agent Detail (chat against a real PR) ────────────────────────
+const adBackBtn       = $('#ad-back-btn');
+const adTitle         = $('#ad-title');
+const adMeta          = $('#ad-meta');
+const adAgentSelect   = $('#ad-agent-select');
+const adModelSelect   = $('#ad-model-select');
+const adChat          = $('#ad-chat');
+const adChatEmpty     = $('#ad-chat-empty');
+const adChatMessages  = $('#ad-chat-messages');
+const adInputForm     = $('#ad-input-form');
+const adInput         = $('#ad-input');
+const adSendBtn       = $('#ad-send-btn');
+
+let adState = 'idle';        // 'idle' | 'preparing' | 'ready' | 'running' | 'done'
+let adTarget = null;         // { kind: 'pr', pr }
+let adCurrentAgentEl = null; // streaming target
+
+function adAppendMsg(role, text) {
+  adChatEmpty.classList.add('hidden');
+  adChatMessages.classList.remove('hidden');
+  const div = document.createElement('div');
+  div.className = `test-msg ${role}`;
+  div.textContent = text;
+  adChatMessages.appendChild(div);
+  adChat.scrollTop = adChat.scrollHeight;
+  return div;
+}
+
+function adAutoSize() {
+  if (!adInput) return;
+  adInput.style.height = 'auto';
+  adInput.style.height = Math.min(adInput.scrollHeight, 220) + 'px';
+}
+
+function adSetState(state) {
+  adState = state;
+  adAgentSelect.disabled = state !== 'ready';
+  adModelSelect.disabled = state !== 'ready';
+  // Submit toggles label/style across the lifecycle.
+  if (state === 'idle' || state === 'preparing') {
+    adSendBtn.disabled = true;
+    adSendBtn.textContent = state === 'preparing' ? 'Loading…' : 'Start';
+    adSendBtn.classList.add('btn-primary');
+    adSendBtn.classList.remove('btn-secondary');
+    adInput.disabled = true;
+  } else if (state === 'ready') {
+    adSendBtn.disabled = false;
+    adSendBtn.textContent = 'Start';
+    adSendBtn.classList.add('btn-primary');
+    adSendBtn.classList.remove('btn-secondary');
+    adInput.disabled = false;
+  } else if (state === 'running') {
+    adSendBtn.disabled = false;
+    adSendBtn.textContent = 'Stop';
+    adSendBtn.classList.remove('btn-primary');
+    adSendBtn.classList.add('btn-secondary');
+    adInput.disabled = true;
+  } else if (state === 'done') {
+    adSendBtn.disabled = false;
+    adSendBtn.textContent = 'Submit';
+    adSendBtn.classList.add('btn-primary');
+    adSendBtn.classList.remove('btn-secondary');
+    adInput.disabled = false;
+  }
+}
+
+function adPopulateAgentSelect(preferred) {
+  adAgentSelect.innerHTML = '';
+  (agents || []).forEach((agent) => {
+    const opt = document.createElement('option');
+    opt.value = agent.id;
+    opt.textContent = agent.name + (agent.available ? '' : ' (not installed)');
+    opt.disabled = !agent.available;
+    adAgentSelect.appendChild(opt);
+  });
+  if (preferred && [...adAgentSelect.options].some((o) => o.value === preferred && !o.disabled)) {
+    adAgentSelect.value = preferred;
+  } else if (selectedAgent && [...adAgentSelect.options].some((o) => o.value === selectedAgent && !o.disabled)) {
+    adAgentSelect.value = selectedAgent;
+  }
+  adPopulateModelSelect();
+}
+
+function adPopulateModelSelect() {
+  const agentId = adAgentSelect.value;
+  const agent = (agents || []).find((a) => a.id === agentId);
+  const prev = adModelSelect.value;
+  adModelSelect.innerHTML = '';
+  const models = (agent && agent.models) || [];
+  models.forEach((m) => {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = m.label || m.id;
+    adModelSelect.appendChild(opt);
+  });
+  if (prev && [...adModelSelect.options].some((o) => o.value === prev)) {
+    adModelSelect.value = prev;
+  } else if (agentModels && agentModels[agentId]
+             && [...adModelSelect.options].some((o) => o.value === agentModels[agentId])) {
+    adModelSelect.value = agentModels[agentId];
+  }
+}
+
+async function openAgentDetail(target) {
+  adTarget = target;
+  adChatMessages.innerHTML = '';
+  adChatMessages.classList.add('hidden');
+  adChatEmpty.classList.remove('hidden');
+  adChatEmpty.querySelector('p').textContent = 'Cloning repo and building prompt…';
+
+  // Header context
+  if (target && target.kind === 'pr' && target.pr) {
+    adTitle.textContent = `!${target.pr.id} ${target.pr.title || ''}`;
+    adMeta.textContent = `${target.pr.project} / ${target.pr.repo}`;
+  } else {
+    adTitle.textContent = 'Agent detail';
+    adMeta.textContent = '';
+  }
+
+  showView(agentDetailView);
+  // If the caller (e.g. work-item repo picker) supplied an agent/model
+  // preference, honor it; otherwise fall back to the toolbar default.
+  adPopulateAgentSelect(target && target.agentId);
+  if (target && target.model) {
+    if ([...adModelSelect.options].some((o) => o.value === target.model)) {
+      adModelSelect.value = target.model;
+    }
+  }
+  adSetState('preparing');
+
+  const agentId = adAgentSelect.value;
+  const model = adModelSelect.value || (agentModels && agentModels[agentId]) || null;
+
+  let result;
+  try {
+    result = await window.lgtm.agentDetailPrepare(target, agentId, model);
+  } catch (err) {
+    result = { success: false, error: err.message };
+  }
+
+  if (!result.success) {
+    adAppendMsg('error', result.error || 'Failed to prepare detail session.');
+    adSetState('idle');
+    return;
+  }
+
+  adAppendMsg('prompt', result.prompt);
+  adChatEmpty.classList.add('hidden');
+  adSetState('ready');
+}
+
+adBackBtn && adBackBtn.addEventListener('click', async () => {
+  await window.lgtm.agentDetailCleanup().catch(() => {});
+  adTarget = null;
+  showView(prListView);
+});
+
+// Re-populate model dropdown when the agent changes.
+adAgentSelect && adAgentSelect.addEventListener('change', adPopulateModelSelect);
+
+adInputForm && adInputForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (adState === 'running') {
+    window.lgtm.agentDetailStop().catch(() => {});
+    return;
+  }
+
+  let messageToSend;
+  if (adState === 'ready') {
+    // First click of Start: send the prepared prompt as the first turn.
+    // The user has already seen it (it's the light-blue first message).
+    const promptEl = adChatMessages.querySelector('.test-msg.prompt');
+    if (!promptEl) {
+      adAppendMsg('error', 'No prompt to send. Try going back and reopening.');
+      return;
+    }
+    messageToSend = promptEl.textContent;
+    // Don't echo a "user message" for the first turn — the prompt is
+    // already visible and labelled distinctly.
+  } else if (adState === 'done') {
+    const text = adInput.value.trim();
+    if (!text) return;
+    messageToSend = text;
+    adInput.value = '';
+    adAutoSize();
+    adAppendMsg('user', text);
+  } else {
+    return;
+  }
+
+  adCurrentAgentEl = adAppendMsg('agent', '');
+  const placeholder = document.createElement('span');
+  placeholder.className = 'test-msg-pending';
+  placeholder.textContent = '…';
+  adCurrentAgentEl.appendChild(placeholder);
+  adSetState('running');
+
+  let result;
+  try {
+    result = await window.lgtm.agentDetailSend(messageToSend);
+  } catch (err) {
+    result = { success: false, error: err.message };
+  }
+
+  const stillPending = adCurrentAgentEl && adCurrentAgentEl.querySelector('.test-msg-pending');
+  if (stillPending) stillPending.remove();
+
+  if (!result.success) {
+    if (adCurrentAgentEl && !adCurrentAgentEl.textContent.trim()) {
+      adCurrentAgentEl.remove();
+    }
+    adAppendMsg('error', result.error || `Agent exited ${result.exitCode}${result.signal ? ` (${result.signal})` : ''}`);
+  } else if (adCurrentAgentEl && !adCurrentAgentEl.textContent.trim()) {
+    adCurrentAgentEl.textContent = '(no output)';
+  }
+  adCurrentAgentEl = null;
+  adSetState('done');
+  adInput.focus();
+});
+
+adInput && adInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    adInputForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  }
+});
+adInput && adInput.addEventListener('input', adAutoSize);
+
+window.lgtm.onAgentDetailOutput((data) => {
+  if (!adCurrentAgentEl || !data || typeof data.chunk !== 'string') return;
+  const pending = adCurrentAgentEl.querySelector('.test-msg-pending');
+  if (pending) pending.remove();
+  adCurrentAgentEl.appendChild(document.createTextNode(data.chunk));
+  adChat.scrollTop = adChat.scrollHeight;
+});
