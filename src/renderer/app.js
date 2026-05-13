@@ -2542,6 +2542,14 @@ async function bootFromPatStatus() {
   }
 
   if (!status || !status.hasPat) {
+    // Pre-fill the org URL we already had on file so the user only
+    // has to paste a new PAT, and tell them why they're back here
+    // if main validated and rejected the cached PAT.
+    if (status && status.orgUrl) orgUrlInput.value = status.orgUrl;
+    if (status && status.patExpired) {
+      setPatMsg('Your saved PAT was rejected by Azure DevOps. Paste a new one to continue.', 'error');
+      patInput.focus();
+    }
     showView(patSetup);
     return;
   }

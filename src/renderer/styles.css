@@ -1808,5 +1808,8 @@ hr {
   flex: 1 1 50%;
   font-size: 12px;
   padding: 6px 12px;
+  /* Cancel .btn-primary's 16px top margin so Submit aligns with
+     Restart/Start in the half-width pair. */
+  margin-top: 0;
   -webkit-app-region: no-drag;
 }

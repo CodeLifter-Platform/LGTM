@@ -75,6 +75,7 @@ For each open thread, in order:
 - If the comment is out of scope for this PR (separate refactor, separate ticket) → **Won't fix** with a note that it should be tracked as a follow-up.
 - If the comment is ambiguous, requires a product/design decision, or asks about intent that only the user can answer → **Cannot resolve**.
 - If you attempt a fix and discover it would require architectural changes well beyond the comment's scope → **Cannot resolve**, and explain what you found.
+- If the comment is tagged `[BLOCKER]` or `[CRITICAL]` and covers correctness, security, data integrity, or potential data loss → **Won't fix is not an acceptable outcome.** Choose **Fix** or **Cannot resolve**. The next review pass evaluates Won't-Fix rationales (per `LGTM_REVIEW_PROMPT.md` rule 7) and a Blocker/Critical correctness or security finding closed by assertion will be reopened — saving the round-trip means handling it now.
 
 **c. Execute the action.** See per-action requirements below.
 
@@ -91,10 +92,14 @@ For each open thread, in order:
 
 **Won't fix:**
 
-- Reply to the thread with a substantive justification: what the reviewer's concern was, why the current code is correct or preferable, and any context the reviewer may not have had.
-- If the suggestion is reasonable but out of scope, say so explicitly and recommend opening a follow-up ticket.
+- Reply with a substantive justification. **Your rationale will be evaluated on the next review pass** against the criteria in `LGTM_REVIEW_PROMPT.md` rule 7 ("Won't Fix / By Design — evaluate the rationale"). To survive that evaluation the rationale must be:
+  1. **Specific** — name which deliberate decision, scope boundary, external constraint, or rule applies. Generic "by design" / "we decided not to" / "out of scope" with no substance will be reopened.
+  2. **Responsive to the actual concern** — restate the reviewer's concern in one line, then explain why the current code addresses that specific risk (mitigation elsewhere in the codebase, input boundary that makes the issue non-reachable, intentional trade-off the team accepts and why). Don't pivot to a different point.
+  3. **Severity-appropriate** — do not Won't-Fix a `[BLOCKER]` or `[CRITICAL]` correctness / security / data-integrity finding (see decision logic above; Fix or Cannot Resolve instead). For `[MAJOR]` and below, design / scope / preference rationales are legitimate when properly supported.
+- If you are declining because an applicable `*_RULES.md` rule supports the current code, **quote the relevant rule and name the file path**. This is the cleanest rationale — the next review pass will respect a rule-grounded Won't-Fix.
+- If the suggestion is reasonable but out of scope, say so explicitly and recommend opening a follow-up ticket. Reference a tracking item ID if you can.
 - Mark the thread status as `wontFix` via `PATCH .../threads/{threadId}` with body `{ "status": "wontFix" }`.
-- Never mark a thread won't-fix without a reasoned reply. Silent dismissal is unacceptable.
+- Never mark a thread won't-fix without a reasoned reply. Silent dismissal is unacceptable and will be reopened.
 
 **Cannot resolve:**
 

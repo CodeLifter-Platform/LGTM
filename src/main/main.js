@@ -3,6 +3,7 @@ const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const axios = require('axios');
 const { autoUpdater } = require('electron-updater');
 const { PatStore } = require('./pat-store');
 const { DevOpsClient } = require('./devops-client');
@@ -22,6 +23,10 @@ let agentRegistry = null;
 let webhookServer = null;
 let currentPat = null;
 let currentUser = null;
+// Flipped to true if a stored PAT was rejected by the org at startup.
+// Tied to !currentPat in get-pat-status so it auto-clears the moment
+// the user enters a fresh valid PAT.
+let patRejectedAtStartup = false;
 
 const config = new ElectronStore({
   defaults: {
@@ -91,6 +96,54 @@ function initAutoUpdater() {
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) { app.quit(); }
 
+/**
+ * Cheapest authenticated round-trip against Azure DevOps. Hits
+ * `_apis/ConnectionData?connectOptions=none` — the SDK uses this
+ * under the hood for `getMe()` but going via axios skips the SDK
+ * client warmup and gives us a tight timeout we control.
+ *
+ * Returns:
+ *   { ok: true }                       — PAT works
+ *   { ok: false, reason: 'rejected' }  — org responded but auth failed
+ *   { ok: false, reason: 'unreachable' } — DNS / timeout / network
+ *
+ * The reason matters: a rejected PAT forces re-entry, but a network
+ * blip should let the user into the app with whatever's cached.
+ */
+async function quickValidatePat(pat, orgUrl) {
+  const parsed = DevOpsClient.parseOrgUrl(orgUrl);
+  if (!parsed.orgUrl) return { ok: false, reason: 'rejected' };
+  const auth = Buffer.from(`:${pat}`).toString('base64');
+  const url = `${parsed.orgUrl}/_apis/ConnectionData?connectOptions=none&api-version=7.0`;
+  try {
+    const res = await axios.get(url, {
+      timeout: 4000,
+      headers: { Authorization: `Basic ${auth}`, Accept: 'application/json' },
+      validateStatus: () => true,            // we want to inspect the code ourselves
+      maxRedirects: 0,                       // ADO redirects unauth'd traffic to the sign-in page
+    });
+    const user = res.data && res.data.authenticatedUser;
+    // ADO's "your PAT is bad" signal is a 203 with HTML, not a 401 —
+    // hence the explicit user.id check.
+    if (res.status === 200 && user && user.id) {
+      return { ok: true };
+    }
+    if (res.status === 401 || res.status === 403 || res.status === 203) {
+      return { ok: false, reason: 'rejected' };
+    }
+    return { ok: false, reason: 'unreachable' };
+  } catch (err) {
+    const code = err && err.code;
+    if (code === 'ENOTFOUND' || code === 'ECONNREFUSED' || code === 'ETIMEDOUT'
+        || code === 'ECONNABORTED' || code === 'EAI_AGAIN' || code === 'ENETUNREACH') {
+      return { ok: false, reason: 'unreachable' };
+    }
+    // Unknown failure mode — be conservative and don't lock the user out.
+    console.warn('[LGTM] quickValidatePat error (treating as unreachable):', err.message);
+    return { ok: false, reason: 'unreachable' };
+  }
+}
+
 // ── App lifecycle ────────────────────────────────────────────────────
 app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.dock.hide();
@@ -104,14 +157,38 @@ app.whenReady().then(async () => {
   // boot; if we created the window first, there'd be a race where
   // the renderer could invoke the IPC handler before currentPat
   // was populated. Doing it first guarantees the answer is ready.
+  //
+  // We also fast-validate the stored PAT here. The whole point is
+  // that a dead PAT never lets the main UI open — the renderer
+  // sees hasPat=false and lands on the setup form. We deliberately
+  // await the validation so the answer to get-pat-status is final
+  // by the time the renderer asks.
   const existingPat = await patStore.get();
   const orgUrl = config.get('orgUrl');
   if (existingPat && orgUrl) {
-    currentPat = existingPat;
-    agentRunner.setCredentials(existingPat, DevOpsClient.parseOrgUrl(orgUrl).orgUrl);
-    initDevOps(existingPat, orgUrl).catch((err) => {
-      console.warn('[LGTM] initDevOps error (background):', err.message);
-    });
+    const t0 = Date.now();
+    const check = await quickValidatePat(existingPat, orgUrl);
+    console.log(`[LGTM] Startup PAT check: ${check.ok ? 'ok' : check.reason} in ${Date.now() - t0}ms`);
+    if (check.ok) {
+      currentPat = existingPat;
+      agentRunner.setCredentials(existingPat, DevOpsClient.parseOrgUrl(orgUrl).orgUrl);
+      initDevOps(existingPat, orgUrl).catch((err) => {
+        console.warn('[LGTM] initDevOps error (background):', err.message);
+      });
+    } else if (check.reason === 'rejected') {
+      // Force re-entry: leave currentPat null so the renderer's
+      // boot flow lands on the PAT setup view with patExpired set.
+      patRejectedAtStartup = true;
+    } else {
+      // Network blip — give the cached PAT the benefit of the doubt
+      // so the user isn't locked out offline. initDevOps will retry
+      // on its own polling cadence once connectivity returns.
+      currentPat = existingPat;
+      agentRunner.setCredentials(existingPat, DevOpsClient.parseOrgUrl(orgUrl).orgUrl);
+      initDevOps(existingPat, orgUrl).catch((err) => {
+        console.warn('[LGTM] initDevOps error (background):', err.message);
+      });
+    }
   }
 
   createTray();
@@ -134,9 +211,14 @@ app.whenReady().then(async () => {
 // Renderer asks for PAT status as part of its own boot sequence —
 // guaranteed to arrive at a moment when the renderer is ready to
 // react to the answer.
+//
+// `patExpired` lets the renderer pre-fill the org URL and tell the
+// user *why* they're back on the setup screen. It's gated on
+// !currentPat so it auto-clears as soon as a fresh PAT is accepted.
 ipcMain.handle('get-pat-status', () => ({
   hasPat: !!currentPat,
   orgUrl: config.get('orgUrl') || '',
+  patExpired: patRejectedAtStartup && !currentPat,
 }));
 
 app.on('window-all-closed', (e) => e.preventDefault());
@@ -334,6 +416,7 @@ ipcMain.handle('clear-pat', async () => {
   currentPat = null;
   currentUser = null;
   devopsClient = null;
+  patRejectedAtStartup = false;
   if (webhookServer) webhookServer.stop();
   return { success: true };
 });
