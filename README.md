@@ -5,6 +5,8 @@ A cross-platform menu bar app that lists your open Azure DevOps pull requests an
 [![Build & Release](https://github.com/CodeLifterIO/LGTM/actions/workflows/build.yml/badge.svg)](https://github.com/CodeLifterIO/LGTM/actions/workflows/build.yml)
 [![Latest Release](https://img.shields.io/github/v/release/CodeLifterIO/LGTM?include_prereleases&label=latest)](https://github.com/CodeLifterIO/LGTM/releases/latest)
 
+**Repository:** <https://github.com/CodeLifter-Platform/LGTM>
+
 ## Download Latest
 
 | Platform | Installer | Portable |
