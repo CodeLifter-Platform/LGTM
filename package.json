@@ -1,6 +1,6 @@
 {
   "name": "lgtm",
-  "version": "0.5.25",
+  "version": "0.5.39",
   "description": "LGTM — Azure DevOps PR reviewer powered by Claude Code",
   "main": "src/main/main.js",
   "scripts": {
