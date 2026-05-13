@@ -337,7 +337,11 @@ class DevOpsClient {
     }
 
     const wit = await this._getWit();
-    const assignedClause = assignedToMeOnly ? `AND [System.AssignedTo] = @Me` : '';
+    // "Mine" → assigned to the calling user. "All" → assigned to any
+    // user (still excludes items with no assignee, by request).
+    const assignedClause = assignedToMeOnly
+      ? `AND [System.AssignedTo] = @Me`
+      : `AND [System.AssignedTo] <> ''`;
     const wiqlQuery = {
       query: `
         SELECT [System.Id]
@@ -455,7 +459,11 @@ class DevOpsClient {
     }
 
     const wit = await this._getWit();
-    const assignedClause = assignedToMeOnly ? `AND [System.AssignedTo] = @Me` : '';
+    // "Mine" → assigned to the calling user. "All" → assigned to any
+    // user (still excludes items with no assignee, by request).
+    const assignedClause = assignedToMeOnly
+      ? `AND [System.AssignedTo] = @Me`
+      : `AND [System.AssignedTo] <> ''`;
     const wiqlQuery = {
       query: `
         SELECT [System.Id]
