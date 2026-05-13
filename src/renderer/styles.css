@@ -229,6 +229,13 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-row .btn-primary,
 .btn-row .btn-secondary { flex: 1; width: auto; margin-top: 0; }
 
+/* Settings action row: Disconnect (1/4, left) + Save (3/4). Both
+   buttons get margin-top: 0 and width: auto so the row's default
+   align-items: stretch makes them the same height regardless of
+   label wrapping. */
+.settings-action-row .btn-danger  { flex: 1 1 0; width: auto; margin-top: 0; }
+.settings-action-row .btn-primary { flex: 3 1 0; width: auto; margin-top: 0; }
+
 /* ── Status messages ───────────────────────────────────────────── */
 .status-msg {
   margin-top: 12px;
