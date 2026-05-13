@@ -384,6 +384,13 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .agent-select:focus { border-color: var(--accent); }
 .agent-select option:disabled { color: var(--text-dim); }
 
+/* Filter-style dropdowns in bugs/tickets toolbars hug their content so
+   the agent select still gets the lion's share of the row. */
+.filter-select {
+  flex: 0 0 auto;
+  min-width: 92px;
+}
+
 /* ── PR list ───────────────────────────────────────────────────── */
 .pr-list {
   flex: 1;

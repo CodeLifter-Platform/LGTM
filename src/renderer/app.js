@@ -44,8 +44,14 @@ const noTicketsEl   = $('#no-tickets');
 
 // Per-tab toolbars
 const bugsAgentSelect      = $('#bugs-agent-select');
+const bugsScopeFilter      = $('#bugs-scope-filter');
+const bugsPrFilter         = $('#bugs-pr-filter');
+const bugsHint             = $('#bugs-hint');
 const bugsSettingsBtn      = $('#bugs-settings-btn');
 const ticketsAgentSelect   = $('#tickets-agent-select');
+const ticketsScopeFilter   = $('#tickets-scope-filter');
+const ticketsPrFilter      = $('#tickets-pr-filter');
+const ticketsHint          = $('#tickets-hint');
 const ticketsSettingsBtn   = $('#tickets-settings-btn');
 
 // Per-tab settings views
@@ -124,6 +130,11 @@ let activeTab = 'prs';
 let bugsLoaded = false;
 let currentTickets = [];
 let ticketsLoaded = false;
+// Filter state for the bugs / tickets tabs — hydrated from settings on
+// boot. Defaults mirror what the user picks first time: "mine" and "no
+// PR" (the actionable pile). Persisted via saveSettings on change.
+let bugsFilters = { scope: 'mine', prFilter: 'none' };
+let ticketsFilters = { scope: 'mine', prFilter: 'none' };
 let collapsedBugProjects = {};     // project → boolean (true = collapsed)
 let collapsedTicketProjects = {};  // project → boolean (true = collapsed)
 let revealedRows = new Set();       // row keys currently showing Play/dismiss
@@ -233,8 +244,50 @@ async function loadAgents() {
   ticketsAgentModels = settings.ticketsAgentModels || {};
   ticketsRepoConfigs = settings.ticketsRepoConfigs || {};
 
+  // Bugs/Tickets filter state — guard each subkey so a settings file
+  // saved before this feature shipped doesn't end up with undefined
+  // and break the selects.
+  const persistedBugsFilters = settings.bugsFilters || {};
+  const persistedTicketsFilters = settings.ticketsFilters || {};
+  bugsFilters = {
+    scope: persistedBugsFilters.scope || 'mine',
+    prFilter: persistedBugsFilters.prFilter || 'none',
+  };
+  ticketsFilters = {
+    scope: persistedTicketsFilters.scope || 'mine',
+    prFilter: persistedTicketsFilters.prFilter || 'none',
+  };
+  applyFilterSelectsFromState();
+
   renderAgentSelect();
   renderTabAgentSelects();
+}
+
+/**
+ * Push current bugsFilters / ticketsFilters state into the four
+ * <select> controls and refresh the hint lines. Called after settings
+ * load and whenever filter state changes via code (not the user).
+ */
+function applyFilterSelectsFromState() {
+  if (bugsScopeFilter)   bugsScopeFilter.value   = bugsFilters.scope;
+  if (bugsPrFilter)      bugsPrFilter.value      = bugsFilters.prFilter;
+  if (ticketsScopeFilter) ticketsScopeFilter.value = ticketsFilters.scope;
+  if (ticketsPrFilter)    ticketsPrFilter.value    = ticketsFilters.prFilter;
+  updateFilterHints();
+}
+
+function updateFilterHints() {
+  if (bugsHint) bugsHint.innerHTML = describeFilter('Open bugs', bugsFilters, 'priority within each');
+  if (ticketsHint) ticketsHint.innerHTML = describeFilter('Open tickets', ticketsFilters, 'sprint recency');
+}
+
+function describeFilter(prefix, filters, sortNote) {
+  const who = filters.scope === 'mine' ? '<strong>assigned to you</strong>' : '<strong>across all assignees</strong>';
+  let pr;
+  if (filters.prFilter === 'has')  pr = ' with a linked PR';
+  else if (filters.prFilter === 'none') pr = ' without a linked PR';
+  else pr = '';
+  return `${prefix} ${who}${pr} · grouped by project · sorted by ${sortNote}`;
 }
 
 function renderTabAgentSelects() {
@@ -263,6 +316,30 @@ ticketsAgentSelect && ticketsAgentSelect.addEventListener('change', async () => 
   ticketsSelectedAgent = ticketsAgentSelect.value;
   await window.lgtm.saveSettings({ ticketsAgent: ticketsSelectedAgent });
 });
+
+/**
+ * Filter-change handlers — persist the new state and immediately
+ * re-fetch the matching tab so the user sees results without having to
+ * click Refresh. Errors are surfaced through the existing render path.
+ */
+async function onBugsFilterChange() {
+  bugsFilters = { scope: bugsScopeFilter.value, prFilter: bugsPrFilter.value };
+  updateFilterHints();
+  await window.lgtm.saveSettings({ bugsFilters });
+  const result = await window.lgtm.refreshBugs(bugsFilters);
+  if (result && result.success) renderBugList(result.bugs);
+}
+async function onTicketsFilterChange() {
+  ticketsFilters = { scope: ticketsScopeFilter.value, prFilter: ticketsPrFilter.value };
+  updateFilterHints();
+  await window.lgtm.saveSettings({ ticketsFilters });
+  const result = await window.lgtm.refreshWorkItems(ticketsFilters);
+  if (result && result.success) renderTicketList(result.items);
+}
+bugsScopeFilter    && bugsScopeFilter.addEventListener('change', onBugsFilterChange);
+bugsPrFilter       && bugsPrFilter.addEventListener('change', onBugsFilterChange);
+ticketsScopeFilter && ticketsScopeFilter.addEventListener('change', onTicketsFilterChange);
+ticketsPrFilter    && ticketsPrFilter.addEventListener('change', onTicketsFilterChange);
 
 function renderAgentSelect() {
   agentSelect.innerHTML = '';
@@ -308,13 +385,13 @@ patSubmit.addEventListener('click', async () => {
 
     if (!bugsLoaded) {
       bugsLoaded = true;
-      window.lgtm.refreshBugs().then((r) => {
+      window.lgtm.refreshBugs(bugsFilters).then((r) => {
         if (r && r.success) renderBugList(r.bugs);
       }).catch(() => {});
     }
     if (!ticketsLoaded) {
       ticketsLoaded = true;
-      window.lgtm.refreshWorkItems().then((r) => {
+      window.lgtm.refreshWorkItems(ticketsFilters).then((r) => {
         if (r && r.success) renderTicketList(r.items);
       }).catch(() => {});
     }
@@ -1356,10 +1433,10 @@ refreshBtn.addEventListener('click', async () => {
   refreshBtn.textContent = '⟳';
   try {
     if (activeTab === 'bugs') {
-      const result = await window.lgtm.refreshBugs();
+      const result = await window.lgtm.refreshBugs(bugsFilters);
       if (result.success) renderBugList(result.bugs);
     } else if (activeTab === 'tickets') {
-      const result = await window.lgtm.refreshWorkItems();
+      const result = await window.lgtm.refreshWorkItems(ticketsFilters);
       if (result.success) renderTicketList(result.items);
     } else {
       const result = await window.lgtm.refreshPrs();
@@ -1476,7 +1553,7 @@ function renderBugList(bugs) {
 async function refreshBugs() {
   bugListEl.innerHTML = '<div class="loading">Loading bugs…</div>';
   noBugsEl.classList.add('hidden');
-  const result = await window.lgtm.refreshBugs();
+  const result = await window.lgtm.refreshBugs(bugsFilters);
   if (result.success) {
     renderBugList(result.bugs);
   } else {
@@ -1938,7 +2015,7 @@ function typeClassFor(type) {
 async function refreshTickets() {
   ticketListEl.innerHTML = '<div class="loading">Loading tickets…</div>';
   noTicketsEl.classList.add('hidden');
-  const result = await window.lgtm.refreshWorkItems();
+  const result = await window.lgtm.refreshWorkItems(ticketsFilters);
   if (result.success) {
     renderTicketList(result.items);
   } else {
@@ -2563,13 +2640,13 @@ async function bootFromPatStatus() {
   subtitleEl.textContent = (status.orgUrl || '').replace('https://dev.azure.com/', '');
   if (!bugsLoaded) {
     bugsLoaded = true;
-    window.lgtm.refreshBugs().then((result) => {
+    window.lgtm.refreshBugs(bugsFilters).then((result) => {
       if (result && result.success) renderBugList(result.bugs);
     }).catch(() => {});
   }
   if (!ticketsLoaded) {
     ticketsLoaded = true;
-    window.lgtm.refreshWorkItems().then((result) => {
+    window.lgtm.refreshWorkItems(ticketsFilters).then((result) => {
       if (result && result.success) renderTicketList(result.items);
     }).catch(() => {});
   }

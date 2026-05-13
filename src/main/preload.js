@@ -11,11 +11,11 @@ contextBridge.exposeInMainWorld('lgtm', {
   // PRs
   refreshPrs: () => ipcRenderer.invoke('refresh-prs'),
 
-  // Bugs
-  refreshBugs: () => ipcRenderer.invoke('refresh-bugs'),
+  // Bugs (params: { scope: 'mine'|'all', prFilter: 'all'|'has'|'none' })
+  refreshBugs: (params) => ipcRenderer.invoke('refresh-bugs', params),
 
-  // Work items (non-bug tickets)
-  refreshWorkItems: () => ipcRenderer.invoke('refresh-workitems'),
+  // Work items (non-bug tickets) — same params shape as refreshBugs
+  refreshWorkItems: (params) => ipcRenderer.invoke('refresh-workitems', params),
 
 
   // External
