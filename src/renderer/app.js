@@ -108,7 +108,6 @@ const agentConfigList   = $('#agent-config-list');
 const repoConfigList    = $('#repo-config-list');
 const conventionHint    = $('#convention-hint');
 const settingsSave      = $('#settings-save');
-const settingsBack      = $('#settings-back');
 const disconnectBtn     = $('#disconnect-btn');
 const subtitleEl        = $('#subtitle');
 
@@ -2326,8 +2325,6 @@ settingsSave.addEventListener('click', async () => {
   renderAgentSelect();
   showView(prListView);
 });
-
-settingsBack.addEventListener('click', () => showView(prListView));
 
 // ── Per-tab settings: Bugs / Tickets ─────────────────────────────
 bugsSettingsBtn.addEventListener('click', async () => {
