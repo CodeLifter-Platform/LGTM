@@ -1197,6 +1197,24 @@ function updateActionButtons(detail) {
 function renderOutput() {
   const text = detailState.rawOutput || '';
   const term = detailState.searchTerm.trim();
+
+  // No output yet and the run is still spinning up → show the loading
+  // splash instead of an empty pre-block. As soon as the first chunk
+  // streams in, this function fires again with non-empty text and the
+  // splash is replaced by the rendered markdown.
+  if (!text && detailState.detail) {
+    const status = detailState.detail.status;
+    if (status === 'cloning' || status === 'running' || status === 'pending') {
+      reviewOutputEl.innerHTML =
+        '<div class="loading-splash">' +
+          '<div class="spinner-ring" aria-hidden="true"></div>' +
+          '<p>Cloning repo and starting agent…</p>' +
+        '</div>';
+      if (rdOutputMetaEl) rdOutputMetaEl.textContent = '';
+      return;
+    }
+  }
+
   let html = renderMarkdownToHtml(text);
   if (term) {
     const re = new RegExp(escapeRegex(term), 'gi');
@@ -2814,6 +2832,7 @@ const testModelSelect  = $('#test-model-select');
 const testStartBtn     = $('#test-start-btn');
 const testChat         = $('#test-chat');
 const testChatEmpty    = $('#test-chat-empty');
+const testChatLoading  = $('#test-chat-loading');
 const testChatMessages = $('#test-chat-messages');
 const testInputForm    = $('#test-input-form');
 const testInput        = $('#test-input');
@@ -2921,12 +2940,16 @@ testStartBtn && testStartBtn.addEventListener('click', async () => {
   }
   testStartBtn.disabled = true;
   testStartBtn.textContent = 'Starting…';
-  // Reset visible chat each time Start is pressed.
+  // Reset visible chat each time Start is pressed and show the
+  // loading splash while we wait for the agent's --version probe.
   testChatMessages.innerHTML = '';
-  testChatMessages.classList.remove('hidden');
+  testChatMessages.classList.add('hidden');
   testChatEmpty.classList.add('hidden');
+  if (testChatLoading) testChatLoading.classList.remove('hidden');
 
   const result = await window.lgtm.agentTestVersion(agentId);
+  if (testChatLoading) testChatLoading.classList.add('hidden');
+  testChatMessages.classList.remove('hidden');
   testStartBtn.textContent = 'Restart';
   testStartBtn.disabled = false;
 
@@ -3202,10 +3225,24 @@ adInputForm && adInputForm.addEventListener('submit', async (e) => {
     return;
   }
 
+  // First turn ('ready' → 'running') means the agent is spinning up and
+  // about to read the cloned repo for the first time. That can take
+  // 10–60s, so use the loading-splash variant (spinner above message).
+  // Follow-up turns reuse the existing dim '…' since the agent is
+  // already loaded and responses start streaming quickly.
+  const isFirstTurn = adState === 'ready';
   adCurrentAgentEl = adAppendMsg('agent', '');
-  const placeholder = document.createElement('span');
+  const placeholder = document.createElement('div');
   placeholder.className = 'test-msg-pending';
-  placeholder.textContent = '…';
+  if (isFirstTurn) {
+    placeholder.innerHTML =
+      '<div class="loading-splash inline">' +
+        '<div class="spinner-ring" aria-hidden="true"></div>' +
+        '<p>Agent is reading the repo…</p>' +
+      '</div>';
+  } else {
+    placeholder.textContent = '…';
+  }
   adCurrentAgentEl.appendChild(placeholder);
   adSetState('running');
 

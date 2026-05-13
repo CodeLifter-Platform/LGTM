@@ -1696,6 +1696,55 @@ hr {
 @keyframes ad-loader-spin {
   to { transform: rotate(360deg); }
 }
+
+/* Reusable loading splash — spinner above a short message. Used
+   anywhere the user is waiting for an agent to spin up: Chat tab
+   after Start, Agent Detail's first turn (.inline variant inside the
+   message bubble), and Review Detail's clone+startup. */
+.loading-splash {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 32px 16px 24px;
+  color: var(--text-dim);
+  font-size: 13px;
+  text-align: center;
+}
+.loading-splash p { margin: 0; }
+/* Compact variant for use inside a message bubble. */
+.loading-splash.inline {
+  padding: 4px 0;
+  gap: 10px;
+  font-style: normal;
+}
+.loading-splash.inline .spinner-ring {
+  width: 28px;
+  height: 28px;
+  -webkit-mask: radial-gradient(circle at center, transparent 9px, #000 10px);
+          mask: radial-gradient(circle at center, transparent 9px, #000 10px);
+}
+
+/* Spinner ring shared by .loading-splash everywhere. Same conic-
+   gradient + radial-mask approach as .ad-loader so we get a ring
+   with a comet trail that chases its own tail. */
+.spinner-ring {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    rgba(76, 201, 240, 0)    0deg,
+    rgba(76, 201, 240, 0.15) 90deg,
+    rgba(76, 201, 240, 0.55) 270deg,
+    var(--accent)            359deg
+  );
+  -webkit-mask: radial-gradient(circle at center, transparent 14px, #000 15px);
+          mask: radial-gradient(circle at center, transparent 14px, #000 15px);
+  animation: ad-loader-spin 1.1s cubic-bezier(0.4, 0.0, 0.2, 1) infinite;
+}
+
 .test-chat-messages {
   display: flex;
   flex-direction: column;
