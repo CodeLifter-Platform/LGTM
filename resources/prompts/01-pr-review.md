@@ -114,6 +114,14 @@ For each surviving observation, create a new comment thread via the REST API (`P
 <concrete suggestion: code snippet, alternative approach, or specific question>
 ```
 
+**Markdown formatting (required).** Comment bodies are rendered as GitHub-flavored markdown by Azure DevOps. Every thread you post must read cleanly in that view:
+
+- Fenced code blocks with language tags (`` ```ts ``, `` ```sh ``, `` ```py ``) for any code sample longer than a few characters.
+- Inline `` `code` `` for short identifiers, file paths, CLI flags, env vars.
+- Bulleted lists for enumerations, numbered lists for sequences — don't pack a list into a comma-separated paragraph.
+- Blank lines between paragraphs (so they actually render as paragraphs).
+- Bold sparingly, for genuine emphasis; no raw HTML; no triple-quoted plain-text dumps.
+
 If an observation is repository-wide rather than line-specific (e.g., "this PR introduces a new pattern inconsistent with existing X"), post it as a single PR-level comment, not duplicated across files.
 
 ### 8. Summary comment

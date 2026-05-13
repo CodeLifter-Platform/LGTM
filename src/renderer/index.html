@@ -79,7 +79,7 @@
       <button id="tab-tickets" class="tab" role="tab" aria-selected="false">
         Tickets <span id="tickets-tab-count" class="tab-count hidden">0</span>
       </button>
-      <button id="tab-test" class="tab" role="tab" aria-selected="false">Test</button>
+      <button id="tab-test" class="tab" role="tab" aria-selected="false">Chat</button>
     </div>
 
     <!-- Tab pane: PRs -->
@@ -97,9 +97,18 @@
     <div id="tab-pane-bugs" class="tab-pane hidden">
       <div class="toolbar tab-toolbar">
         <select id="bugs-agent-select" class="agent-select" title="Bug agent"></select>
+        <select id="bugs-scope-filter" class="agent-select filter-select" title="Show bugs assigned to me, or all bugs">
+          <option value="mine">Mine</option>
+          <option value="all">All</option>
+        </select>
+        <select id="bugs-pr-filter" class="agent-select filter-select" title="Filter by linked pull request">
+          <option value="all">All PR states</option>
+          <option value="has">Has PR</option>
+          <option value="none">No PR</option>
+        </select>
         <button id="bugs-settings-btn" class="btn-icon" title="Bugs settings">⚙</button>
       </div>
-      <div class="bugs-hint">Open bugs <strong>assigned to you</strong>, grouped by project · sorted by priority within each</div>
+      <div id="bugs-hint" class="bugs-hint">Open bugs <strong>assigned to you</strong> without a linked PR · grouped by project · sorted by priority within each</div>
 
       <div id="bug-list" class="pr-list">
         <div class="loading">Loading bugs…</div>
@@ -114,9 +123,18 @@
     <div id="tab-pane-tickets" class="tab-pane hidden">
       <div class="toolbar tab-toolbar">
         <select id="tickets-agent-select" class="agent-select" title="Ticket agent"></select>
+        <select id="tickets-scope-filter" class="agent-select filter-select" title="Show tickets assigned to me, or all tickets">
+          <option value="mine">Mine</option>
+          <option value="all">All</option>
+        </select>
+        <select id="tickets-pr-filter" class="agent-select filter-select" title="Filter by linked pull request">
+          <option value="all">All PR states</option>
+          <option value="has">Has PR</option>
+          <option value="none">No PR</option>
+        </select>
         <button id="tickets-settings-btn" class="btn-icon" title="Tickets settings">⚙</button>
       </div>
-      <div class="bugs-hint">Open tickets <strong>assigned to you</strong>, grouped by project · sorted by sprint recency</div>
+      <div id="tickets-hint" class="bugs-hint">Open tickets <strong>assigned to you</strong> without a linked PR · grouped by project · sorted by sprint recency</div>
 
       <div id="ticket-list" class="pr-list">
         <div class="loading">Loading tickets…</div>
@@ -138,6 +156,10 @@
       <div id="test-chat" class="test-chat">
         <div id="test-chat-empty" class="test-chat-empty">
           <p>Pick an agent and model, then click <strong>Start</strong>.</p>
+        </div>
+        <div id="test-chat-loading" class="loading-splash hidden">
+          <div class="spinner-ring" aria-hidden="true"></div>
+          <p>Starting agent…</p>
         </div>
         <div id="test-chat-messages" class="test-chat-messages hidden"></div>
       </div>
@@ -309,13 +331,10 @@
       </div>
 
       <div class="card">
-        <div class="btn-row">
+        <div class="btn-row settings-action-row">
+          <button id="disconnect-btn" class="btn-danger">Disconnect &amp; Clear PAT</button>
           <button id="settings-save" class="btn-primary">Save</button>
-          <button id="settings-back" class="btn-secondary">Back</button>
         </div>
-
-        <hr>
-        <button id="disconnect-btn" class="btn-danger">Disconnect &amp; Clear PAT</button>
       </div>
     </div>
   </section>

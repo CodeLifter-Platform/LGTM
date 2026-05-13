@@ -46,8 +46,27 @@ const config = new ElectronStore({
     ticketsAgent: '',         // agent ID for ticket runs
     ticketsAgentModels: {},
     ticketsRepoConfigs: {},
+    // Filter state for the Bugs / Tickets tabs. scope: 'mine' | 'all'.
+    // prFilter: 'all' | 'has' | 'none' — restricts to items with /
+    // without a linked PR. Defaults match what the user asked for:
+    // assigned-to-me, items without a PR (the "do something next" pile).
+    bugsFilters: { scope: 'mine', prFilter: 'none' },
+    ticketsFilters: { scope: 'mine', prFilter: 'none' },
   },
 });
+
+/**
+ * Drop work items that don't match the requested PR-linkage filter.
+ * 'all' → no-op, 'has' → only items with a linked PR, 'none' → only
+ * items without one. Items carry the `hasLinkedPR` flag from
+ * DevOpsClient (populated via $expand=Relations).
+ */
+function applyPrFilter(items, prFilter) {
+  if (!Array.isArray(items)) return [];
+  if (prFilter === 'has')  return items.filter((it) => it.hasLinkedPR);
+  if (prFilter === 'none') return items.filter((it) => !it.hasLinkedPR);
+  return items;
+}
 
 // ── Auto-updater ────────────────────────────────────────────────────
 autoUpdater.autoDownload = false;       // Don't download until user says so
@@ -437,21 +456,23 @@ ipcMain.handle('refresh-prs', async () => {
 
 // ── IPC: Bugs ────────────────────────────────────────────────────────
 
-ipcMain.handle('refresh-bugs', async () => {
+ipcMain.handle('refresh-bugs', async (_event, params = {}) => {
   if (!devopsClient) return { success: false, error: 'Not authenticated' };
+  const { scope = 'mine', prFilter = 'none' } = params || {};
   try {
-    const bugs = await devopsClient.getMyOpenBugs();
-    return { success: true, bugs };
+    const bugs = await devopsClient.getOpenBugs({ assignedToMeOnly: scope !== 'all' });
+    return { success: true, bugs: applyPrFilter(bugs, prFilter) };
   } catch (err) {
     return { success: false, error: err.message };
   }
 });
 
-ipcMain.handle('refresh-workitems', async () => {
+ipcMain.handle('refresh-workitems', async (_event, params = {}) => {
   if (!devopsClient) return { success: false, error: 'Not authenticated' };
+  const { scope = 'mine', prFilter = 'none' } = params || {};
   try {
-    const items = await devopsClient.getMyOpenWorkItems();
-    return { success: true, items };
+    const items = await devopsClient.getOpenWorkItems({ assignedToMeOnly: scope !== 'all' });
+    return { success: true, items: applyPrFilter(items, prFilter) };
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -1070,6 +1091,8 @@ ipcMain.handle('get-settings', () => ({
   ticketsAgent: config.get('ticketsAgent'),
   ticketsAgentModels: config.get('ticketsAgentModels'),
   ticketsRepoConfigs: config.get('ticketsRepoConfigs'),
+  bugsFilters: config.get('bugsFilters'),
+  ticketsFilters: config.get('ticketsFilters'),
 }));
 
 ipcMain.handle('save-settings', async (_event, settings) => {
@@ -1088,6 +1111,8 @@ ipcMain.handle('save-settings', async (_event, settings) => {
   if (settings.ticketsAgent !== undefined) config.set('ticketsAgent', settings.ticketsAgent);
   if (settings.ticketsAgentModels !== undefined) config.set('ticketsAgentModels', settings.ticketsAgentModels);
   if (settings.ticketsRepoConfigs !== undefined) config.set('ticketsRepoConfigs', settings.ticketsRepoConfigs);
+  if (settings.bugsFilters !== undefined) config.set('bugsFilters', settings.bugsFilters);
+  if (settings.ticketsFilters !== undefined) config.set('ticketsFilters', settings.ticketsFilters);
   return { success: true };
 });
 

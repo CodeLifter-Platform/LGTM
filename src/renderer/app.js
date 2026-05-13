@@ -44,8 +44,14 @@ const noTicketsEl   = $('#no-tickets');
 
 // Per-tab toolbars
 const bugsAgentSelect      = $('#bugs-agent-select');
+const bugsScopeFilter      = $('#bugs-scope-filter');
+const bugsPrFilter         = $('#bugs-pr-filter');
+const bugsHint             = $('#bugs-hint');
 const bugsSettingsBtn      = $('#bugs-settings-btn');
 const ticketsAgentSelect   = $('#tickets-agent-select');
+const ticketsScopeFilter   = $('#tickets-scope-filter');
+const ticketsPrFilter      = $('#tickets-pr-filter');
+const ticketsHint          = $('#tickets-hint');
 const ticketsSettingsBtn   = $('#tickets-settings-btn');
 
 // Per-tab settings views
@@ -102,7 +108,6 @@ const agentConfigList   = $('#agent-config-list');
 const repoConfigList    = $('#repo-config-list');
 const conventionHint    = $('#convention-hint');
 const settingsSave      = $('#settings-save');
-const settingsBack      = $('#settings-back');
 const disconnectBtn     = $('#disconnect-btn');
 const subtitleEl        = $('#subtitle');
 
@@ -124,6 +129,11 @@ let activeTab = 'prs';
 let bugsLoaded = false;
 let currentTickets = [];
 let ticketsLoaded = false;
+// Filter state for the bugs / tickets tabs — hydrated from settings on
+// boot. Defaults mirror what the user picks first time: "mine" and "no
+// PR" (the actionable pile). Persisted via saveSettings on change.
+let bugsFilters = { scope: 'mine', prFilter: 'none' };
+let ticketsFilters = { scope: 'mine', prFilter: 'none' };
 let collapsedBugProjects = {};     // project → boolean (true = collapsed)
 let collapsedTicketProjects = {};  // project → boolean (true = collapsed)
 let revealedRows = new Set();       // row keys currently showing Play/dismiss
@@ -233,8 +243,50 @@ async function loadAgents() {
   ticketsAgentModels = settings.ticketsAgentModels || {};
   ticketsRepoConfigs = settings.ticketsRepoConfigs || {};
 
+  // Bugs/Tickets filter state — guard each subkey so a settings file
+  // saved before this feature shipped doesn't end up with undefined
+  // and break the selects.
+  const persistedBugsFilters = settings.bugsFilters || {};
+  const persistedTicketsFilters = settings.ticketsFilters || {};
+  bugsFilters = {
+    scope: persistedBugsFilters.scope || 'mine',
+    prFilter: persistedBugsFilters.prFilter || 'none',
+  };
+  ticketsFilters = {
+    scope: persistedTicketsFilters.scope || 'mine',
+    prFilter: persistedTicketsFilters.prFilter || 'none',
+  };
+  applyFilterSelectsFromState();
+
   renderAgentSelect();
   renderTabAgentSelects();
+}
+
+/**
+ * Push current bugsFilters / ticketsFilters state into the four
+ * <select> controls and refresh the hint lines. Called after settings
+ * load and whenever filter state changes via code (not the user).
+ */
+function applyFilterSelectsFromState() {
+  if (bugsScopeFilter)   bugsScopeFilter.value   = bugsFilters.scope;
+  if (bugsPrFilter)      bugsPrFilter.value      = bugsFilters.prFilter;
+  if (ticketsScopeFilter) ticketsScopeFilter.value = ticketsFilters.scope;
+  if (ticketsPrFilter)    ticketsPrFilter.value    = ticketsFilters.prFilter;
+  updateFilterHints();
+}
+
+function updateFilterHints() {
+  if (bugsHint) bugsHint.innerHTML = describeFilter('Open bugs', bugsFilters, 'priority within each');
+  if (ticketsHint) ticketsHint.innerHTML = describeFilter('Open tickets', ticketsFilters, 'sprint recency');
+}
+
+function describeFilter(prefix, filters, sortNote) {
+  const who = filters.scope === 'mine' ? '<strong>assigned to you</strong>' : '<strong>across all assignees</strong>';
+  let pr;
+  if (filters.prFilter === 'has')  pr = ' with a linked PR';
+  else if (filters.prFilter === 'none') pr = ' without a linked PR';
+  else pr = '';
+  return `${prefix} ${who}${pr} · grouped by project · sorted by ${sortNote}`;
 }
 
 function renderTabAgentSelects() {
@@ -263,6 +315,30 @@ ticketsAgentSelect && ticketsAgentSelect.addEventListener('change', async () => 
   ticketsSelectedAgent = ticketsAgentSelect.value;
   await window.lgtm.saveSettings({ ticketsAgent: ticketsSelectedAgent });
 });
+
+/**
+ * Filter-change handlers — persist the new state and immediately
+ * re-fetch the matching tab so the user sees results without having to
+ * click Refresh. Errors are surfaced through the existing render path.
+ */
+async function onBugsFilterChange() {
+  bugsFilters = { scope: bugsScopeFilter.value, prFilter: bugsPrFilter.value };
+  updateFilterHints();
+  await window.lgtm.saveSettings({ bugsFilters });
+  const result = await window.lgtm.refreshBugs(bugsFilters);
+  if (result && result.success) renderBugList(result.bugs);
+}
+async function onTicketsFilterChange() {
+  ticketsFilters = { scope: ticketsScopeFilter.value, prFilter: ticketsPrFilter.value };
+  updateFilterHints();
+  await window.lgtm.saveSettings({ ticketsFilters });
+  const result = await window.lgtm.refreshWorkItems(ticketsFilters);
+  if (result && result.success) renderTicketList(result.items);
+}
+bugsScopeFilter    && bugsScopeFilter.addEventListener('change', onBugsFilterChange);
+bugsPrFilter       && bugsPrFilter.addEventListener('change', onBugsFilterChange);
+ticketsScopeFilter && ticketsScopeFilter.addEventListener('change', onTicketsFilterChange);
+ticketsPrFilter    && ticketsPrFilter.addEventListener('change', onTicketsFilterChange);
 
 function renderAgentSelect() {
   agentSelect.innerHTML = '';
@@ -308,13 +384,13 @@ patSubmit.addEventListener('click', async () => {
 
     if (!bugsLoaded) {
       bugsLoaded = true;
-      window.lgtm.refreshBugs().then((r) => {
+      window.lgtm.refreshBugs(bugsFilters).then((r) => {
         if (r && r.success) renderBugList(r.bugs);
       }).catch(() => {});
     }
     if (!ticketsLoaded) {
       ticketsLoaded = true;
-      window.lgtm.refreshWorkItems().then((r) => {
+      window.lgtm.refreshWorkItems(ticketsFilters).then((r) => {
         if (r && r.success) renderTicketList(r.items);
       }).catch(() => {});
     }
@@ -1121,6 +1197,24 @@ function updateActionButtons(detail) {
 function renderOutput() {
   const text = detailState.rawOutput || '';
   const term = detailState.searchTerm.trim();
+
+  // No output yet and the run is still spinning up → show the loading
+  // splash instead of an empty pre-block. As soon as the first chunk
+  // streams in, this function fires again with non-empty text and the
+  // splash is replaced by the rendered markdown.
+  if (!text && detailState.detail) {
+    const status = detailState.detail.status;
+    if (status === 'cloning' || status === 'running' || status === 'pending') {
+      reviewOutputEl.innerHTML =
+        '<div class="loading-splash">' +
+          '<div class="spinner-ring" aria-hidden="true"></div>' +
+          '<p>Cloning repo and starting agent…</p>' +
+        '</div>';
+      if (rdOutputMetaEl) rdOutputMetaEl.textContent = '';
+      return;
+    }
+  }
+
   let html = renderMarkdownToHtml(text);
   if (term) {
     const re = new RegExp(escapeRegex(term), 'gi');
@@ -1356,10 +1450,10 @@ refreshBtn.addEventListener('click', async () => {
   refreshBtn.textContent = '⟳';
   try {
     if (activeTab === 'bugs') {
-      const result = await window.lgtm.refreshBugs();
+      const result = await window.lgtm.refreshBugs(bugsFilters);
       if (result.success) renderBugList(result.bugs);
     } else if (activeTab === 'tickets') {
-      const result = await window.lgtm.refreshWorkItems();
+      const result = await window.lgtm.refreshWorkItems(ticketsFilters);
       if (result.success) renderTicketList(result.items);
     } else {
       const result = await window.lgtm.refreshPrs();
@@ -1476,7 +1570,7 @@ function renderBugList(bugs) {
 async function refreshBugs() {
   bugListEl.innerHTML = '<div class="loading">Loading bugs…</div>';
   noBugsEl.classList.add('hidden');
-  const result = await window.lgtm.refreshBugs();
+  const result = await window.lgtm.refreshBugs(bugsFilters);
   if (result.success) {
     renderBugList(result.bugs);
   } else {
@@ -1938,7 +2032,7 @@ function typeClassFor(type) {
 async function refreshTickets() {
   ticketListEl.innerHTML = '<div class="loading">Loading tickets…</div>';
   noTicketsEl.classList.add('hidden');
-  const result = await window.lgtm.refreshWorkItems();
+  const result = await window.lgtm.refreshWorkItems(ticketsFilters);
   if (result.success) {
     renderTicketList(result.items);
   } else {
@@ -2249,8 +2343,6 @@ settingsSave.addEventListener('click', async () => {
   renderAgentSelect();
   showView(prListView);
 });
-
-settingsBack.addEventListener('click', () => showView(prListView));
 
 // ── Per-tab settings: Bugs / Tickets ─────────────────────────────
 bugsSettingsBtn.addEventListener('click', async () => {
@@ -2563,13 +2655,13 @@ async function bootFromPatStatus() {
   subtitleEl.textContent = (status.orgUrl || '').replace('https://dev.azure.com/', '');
   if (!bugsLoaded) {
     bugsLoaded = true;
-    window.lgtm.refreshBugs().then((result) => {
+    window.lgtm.refreshBugs(bugsFilters).then((result) => {
       if (result && result.success) renderBugList(result.bugs);
     }).catch(() => {});
   }
   if (!ticketsLoaded) {
     ticketsLoaded = true;
-    window.lgtm.refreshWorkItems().then((result) => {
+    window.lgtm.refreshWorkItems(ticketsFilters).then((result) => {
       if (result && result.success) renderTicketList(result.items);
     }).catch(() => {});
   }
@@ -2740,6 +2832,7 @@ const testModelSelect  = $('#test-model-select');
 const testStartBtn     = $('#test-start-btn');
 const testChat         = $('#test-chat');
 const testChatEmpty    = $('#test-chat-empty');
+const testChatLoading  = $('#test-chat-loading');
 const testChatMessages = $('#test-chat-messages');
 const testInputForm    = $('#test-input-form');
 const testInput        = $('#test-input');
@@ -2847,12 +2940,16 @@ testStartBtn && testStartBtn.addEventListener('click', async () => {
   }
   testStartBtn.disabled = true;
   testStartBtn.textContent = 'Starting…';
-  // Reset visible chat each time Start is pressed.
+  // Reset visible chat each time Start is pressed and show the
+  // loading splash while we wait for the agent's --version probe.
   testChatMessages.innerHTML = '';
-  testChatMessages.classList.remove('hidden');
+  testChatMessages.classList.add('hidden');
   testChatEmpty.classList.add('hidden');
+  if (testChatLoading) testChatLoading.classList.remove('hidden');
 
   const result = await window.lgtm.agentTestVersion(agentId);
+  if (testChatLoading) testChatLoading.classList.add('hidden');
+  testChatMessages.classList.remove('hidden');
   testStartBtn.textContent = 'Restart';
   testStartBtn.disabled = false;
 
@@ -3128,10 +3225,24 @@ adInputForm && adInputForm.addEventListener('submit', async (e) => {
     return;
   }
 
+  // First turn ('ready' → 'running') means the agent is spinning up and
+  // about to read the cloned repo for the first time. That can take
+  // 10–60s, so use the loading-splash variant (spinner above message).
+  // Follow-up turns reuse the existing dim '…' since the agent is
+  // already loaded and responses start streaming quickly.
+  const isFirstTurn = adState === 'ready';
   adCurrentAgentEl = adAppendMsg('agent', '');
-  const placeholder = document.createElement('span');
+  const placeholder = document.createElement('div');
   placeholder.className = 'test-msg-pending';
-  placeholder.textContent = '…';
+  if (isFirstTurn) {
+    placeholder.innerHTML =
+      '<div class="loading-splash inline">' +
+        '<div class="spinner-ring" aria-hidden="true"></div>' +
+        '<p>Agent is reading the repo…</p>' +
+      '</div>';
+  } else {
+    placeholder.textContent = '…';
+  }
   adCurrentAgentEl.appendChild(placeholder);
   adSetState('running');
 

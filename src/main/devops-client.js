@@ -300,9 +300,35 @@ class DevOpsClient {
     }));
   }
 
-  // ── Work Items: My Open Bugs ─────────────────────────────────────
+  // ── Work Items: Open Bugs ────────────────────────────────────────
 
-  async getMyOpenBugs() {
+  /**
+   * Detect whether a work item has at least one linked pull request.
+   * ADO represents PR links as `ArtifactLink` relations with the
+   * attribute `name === "Pull Request"`. Work item must have been
+   * fetched with `$expand=Relations` for this to return a meaningful
+   * answer; otherwise `wi.relations` is undefined and we return false.
+   */
+  static _hasLinkedPullRequest(wi) {
+    return (wi && wi.relations ? wi.relations : []).some((r) =>
+      r && r.rel === 'ArtifactLink' && r.attributes && r.attributes.name === 'Pull Request',
+    );
+  }
+
+  /**
+   * Open bugs, by default assigned to the calling user.
+   *
+   * @param {{ assignedToMeOnly?: boolean }} opts
+   *   `assignedToMeOnly` defaults to true (preserves the original
+   *   behaviour of getMyOpenBugs). Set false for the "All" filter.
+   *
+   * Each returned bug has a `hasLinkedPR` boolean reflecting whether
+   * any `ArtifactLink` relation of type Pull Request is attached.
+   * Relations are fetched via `$expand=Relations`, which precludes
+   * passing a narrowed field list — payload per item is slightly
+   * larger but still bounded.
+   */
+  async getOpenBugs({ assignedToMeOnly = true } = {}) {
     let projects = await this.getProjects();
     if (this.projectFilter) {
       projects = projects.filter(
@@ -311,28 +337,21 @@ class DevOpsClient {
     }
 
     const wit = await this._getWit();
+    // "Mine" → assigned to the calling user. "All" → assigned to any
+    // user (still excludes items with no assignee, by request).
+    const assignedClause = assignedToMeOnly
+      ? `AND [System.AssignedTo] = @Me`
+      : `AND [System.AssignedTo] <> ''`;
     const wiqlQuery = {
       query: `
         SELECT [System.Id]
         FROM WorkItems
         WHERE [System.WorkItemType] = 'Bug'
-          AND [System.AssignedTo] = @Me
+          ${assignedClause}
           AND [System.State] NOT IN ('Closed', 'Resolved', 'Done', 'Removed')
         ORDER BY [Microsoft.VSTS.Common.Priority] ASC, [System.CreatedDate] DESC
       `.trim(),
     };
-
-    const fields = [
-      'System.Id',
-      'System.Title',
-      'System.State',
-      'System.TeamProject',
-      'System.AssignedTo',
-      'System.CreatedDate',
-      'System.CreatedBy',
-      'Microsoft.VSTS.Common.Severity',
-      'Microsoft.VSTS.Common.Priority',
-    ];
 
     const allBugs = [];
     for (const project of projects) {
@@ -343,11 +362,14 @@ class DevOpsClient {
 
         for (let i = 0; i < ids.length; i += 200) {
           const chunk = ids.slice(i, i + 200);
+          // ADO's getWorkItems rejects `fields` + `$expand` together,
+          // so we omit fields when expanding relations. Payload is
+          // larger per item but we still need the same fields anyway.
           const items = await wit.getWorkItems(
             chunk,
-            fields,
             undefined,
             undefined,
+            witInterfaces.WorkItemExpand.Relations,
             witInterfaces.WorkItemErrorPolicy.Omit,
           );
           for (const wi of items || []) {
@@ -365,6 +387,7 @@ class DevOpsClient {
               createdBy: (f['System.CreatedBy'] && f['System.CreatedBy'].displayName) || '',
               createdDate: toIso(f['System.CreatedDate']),
               webUrl: `${this.orgUrl}/${encodeURIComponent(f['System.TeamProject'] || project.name)}/_workitems/edit/${wi.id}`,
+              hasLinkedPR: DevOpsClient._hasLinkedPullRequest(wi),
             });
           }
         }
@@ -382,6 +405,11 @@ class DevOpsClient {
       return new Date(b.createdDate) - new Date(a.createdDate);
     });
     return allBugs;
+  }
+
+  // Back-compat alias — existing callers that only want their own bugs.
+  async getMyOpenBugs() {
+    return this.getOpenBugs({ assignedToMeOnly: true });
   }
 
   // ── Iteration metadata (for grouping tickets by sprint recency) ──
@@ -415,9 +443,14 @@ class DevOpsClient {
     }
   }
 
-  // ── Work Items: My Open Non-Bug Tickets ──────────────────────────
+  // ── Work Items: Open Non-Bug Tickets ─────────────────────────────
 
-  async getMyOpenWorkItems() {
+  /**
+   * Open non-bug work items (tickets), by default assigned to the
+   * calling user. See getOpenBugs for the assignedToMeOnly contract
+   * and the relations-expansion / hasLinkedPR detail.
+   */
+  async getOpenWorkItems({ assignedToMeOnly = true } = {}) {
     let projects = await this.getProjects();
     if (this.projectFilter) {
       projects = projects.filter(
@@ -426,29 +459,21 @@ class DevOpsClient {
     }
 
     const wit = await this._getWit();
+    // "Mine" → assigned to the calling user. "All" → assigned to any
+    // user (still excludes items with no assignee, by request).
+    const assignedClause = assignedToMeOnly
+      ? `AND [System.AssignedTo] = @Me`
+      : `AND [System.AssignedTo] <> ''`;
     const wiqlQuery = {
       query: `
         SELECT [System.Id]
         FROM WorkItems
         WHERE [System.WorkItemType] <> 'Bug'
-          AND [System.AssignedTo] = @Me
+          ${assignedClause}
           AND [System.State] NOT IN ('Closed', 'Resolved', 'Done', 'Removed', 'Completed')
         ORDER BY [Microsoft.VSTS.Common.Priority] ASC, [System.ChangedDate] DESC
       `.trim(),
     };
-
-    const fields = [
-      'System.Id',
-      'System.Title',
-      'System.State',
-      'System.WorkItemType',
-      'System.TeamProject',
-      'System.IterationPath',
-      'System.AssignedTo',
-      'System.CreatedDate',
-      'System.ChangedDate',
-      'Microsoft.VSTS.Common.Priority',
-    ];
 
     const allItems = [];
     for (const project of projects) {
@@ -463,9 +488,9 @@ class DevOpsClient {
           const chunk = ids.slice(i, i + 200);
           const items = await wit.getWorkItems(
             chunk,
-            fields,
             undefined,
             undefined,
+            witInterfaces.WorkItemExpand.Relations,
             witInterfaces.WorkItemErrorPolicy.Omit,
           );
           for (const wi of items || []) {
@@ -484,6 +509,7 @@ class DevOpsClient {
                 ? f['Microsoft.VSTS.Common.Priority']
                 : null,
               project: f['System.TeamProject'] || project.name,
+              assignedTo: (f['System.AssignedTo'] && f['System.AssignedTo'].displayName) || '',
               iterationPath: iterPath,
               iterationName: iterName,
               isBacklog,
@@ -492,6 +518,7 @@ class DevOpsClient {
               createdDate: toIso(f['System.CreatedDate']),
               changedDate: toIso(f['System.ChangedDate']),
               webUrl: `${this.orgUrl}/${encodeURIComponent(f['System.TeamProject'] || project.name)}/_workitems/edit/${wi.id}`,
+              hasLinkedPR: DevOpsClient._hasLinkedPullRequest(wi),
             });
           }
         }
@@ -501,6 +528,11 @@ class DevOpsClient {
     }
 
     return allItems;
+  }
+
+  // Back-compat alias — existing callers that only want their own tickets.
+  async getMyOpenWorkItems() {
+    return this.getOpenWorkItems({ assignedToMeOnly: true });
   }
 
   // ── Single work item details (for agent context) ─────────────────
