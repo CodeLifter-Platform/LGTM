@@ -63,6 +63,29 @@ When reviewing a PR that has been reviewed before, you MUST follow these rules s
    - Previous `[BLOCKER]`/`[CRITICAL]`/`[MAJOR]` findings that were resolved but NOT actually fixed
    - Do NOT re-raise findings that were fixed, even if you would phrase them differently now
 
+6. **No duplicates — match by location and substance, not wording.** Before posting any finding, scan all existing threads (any status — Active, Fixed, Resolved, Closed, Won't Fix, By Design, Pending) and check whether the same issue is already raised. Consider it a duplicate when:
+   - It points at the same file and overlapping line range, AND
+   - It describes the same underlying problem (e.g. "null check missing on `user`" matches a prior "possible NPE on `user`" — different wording, same defect)
+
+   If a duplicate exists, skip the finding. The only exception is the narrow re-raise allowed by rule 3 (a previously-resolved Blocker/Critical/Major that is still genuinely present in the current diff) or rule 7 (a Won't Fix whose rationale doesn't hold up). Phrase tweaks, alternate framings, or "but I'd say it differently" are NOT reasons to re-post.
+
+7. **Won't Fix / By Design — evaluate the rationale, don't blindly accept or reject.** Threads marked `WontFix` or `ByDesign` carry the author's reasoning. Read it carefully and apply this test:
+   - **If the rationale is defensible** — the concern is genuinely out of scope, intentional, environment-specific, or acceptably mitigated elsewhere — accept it. Do not re-raise.
+   - **If the rationale is weak or doesn't address the concern** — the author closed it by assertion without engaging with the actual risk, OR the underlying issue is a `[BLOCKER]`/`[CRITICAL]` correctness or security defect that no design intent can excuse (e.g. data loss, security hole, guaranteed crash) — post a NEW thread (do not reopen the old one). Format:
+     ```
+     [BLOCKER|CRITICAL] Category: Reconsider previous "Won't Fix" — <short reason>
+
+     A prior thread on this issue was marked Won't Fix with the rationale:
+     > <quote the author's reason in 1–2 lines>
+
+     This still warrants a fix because <specific, concrete reason the rationale
+     does not address — e.g. "the input still arrives from an untrusted source
+     in path X, which the original rationale didn't account for">.
+
+     **File:** `path/to/file.ext` Line(s): 42
+     ```
+   - **Never re-raise a `[MAJOR]` or below** that was marked Won't Fix or By Design. Author discretion wins below Critical.
+
 ## Review Scope
 
 ### What to review
@@ -91,7 +114,18 @@ Run `git diff {target}...{source}` to see the changes. Review the diff in the co
 - Violations of existing project patterns and conventions
 - Tight coupling, circular dependencies
 - Dead code, unreachable branches
-- Missing or inadequate test coverage for new logic
+
+**Test Coverage (Mandatory)**
+
+Test coverage is a hard requirement on every PR. Apply this rule:
+
+- **New work (new feature, new public function, new code path):** the PR MUST add tests that exercise the new behaviour — happy path plus at least one meaningful edge case (error path, boundary, empty/null input, etc.). If tests are missing, raise at minimum `[MAJOR] Testing: Missing tests for new <feature/function/path>`. Escalate to `[CRITICAL]` when the untested code handles auth, authorization, money, data integrity, or anything with a security or correctness blast radius.
+
+- **Bug fixes:** a regression test is required **when one is reasonably feasible** — i.e. the bug is deterministically reproducible at the unit, integration, or end-to-end layer this repo already supports. If a feasible regression test is missing, raise `[MAJOR] Testing: Add regression test for fixed bug` and describe what the test should assert. If the bug is genuinely hard to test (timing/race in production, third-party flakiness, manual UI verification only, environment-specific), the PR description or a code comment should say so — flag `[MINOR] Testing: Document why no regression test was added` if it doesn't.
+
+- **Quality bar:** existing weak tests count as no test. A test that calls the new code but asserts nothing meaningful (`expect(result).toBeDefined()`, snapshot-only with no behavioural assertion, mocked-away-to-nothing) is not coverage — flag it at the same severity as missing tests.
+
+- **What "tests" means here:** whatever this repo already uses (unit, integration, e2e). Don't demand a layer the project doesn't have. If the repo has no test framework at all, raise `[MAJOR] Testing: No test framework in repo — new work cannot be covered` once, on the summary thread, instead of flooding individual findings.
 
 ### What NOT to flag
 

@@ -91,6 +91,7 @@ After investigation, make a go/no-go decision before branching:
 - You cannot reproduce the bug and the ticket lacks reproduction details
 - The "right" fix conflicts with patterns elsewhere in the codebase and resolving that conflict needs a human
 - The only viable fix would violate a `*_RULES.md` rule (especially a "must" or "never" rule) and no more-specific `*_RULES.md` waives it. Surface the conflict in the work item comment rather than violating the rule.
+- The change cannot be covered by tests at the required quality bar (above) and the bug does not meet the "genuinely untestable" exception, OR the repo has no usable test framework for the change being attempted. Surface this in the work item comment rather than shipping uncovered code.
 - Required external dependencies, secrets, or environment access are not available
 
 Do not branch or commit before this decision. Branch creation pollutes the repo and signals work-in-progress to the team.
@@ -114,8 +115,11 @@ If your team has a different convention discoverable in the repo (CONTRIBUTING.m
 - Make the minimal change that satisfies the acceptance criteria. Do not refactor adjacent code unless it is necessary for the fix.
 - Match existing patterns in the file/module. If you would deviate (introduce a new pattern, library, or abstraction), justify it in the PR description.
 - **Honor the `*_RULES.md` stack at all times.** Every file you create or modify is governed by the rule stack for its directory. If implementation drifts into a directory you didn't anticipate during step 2, load that directory's rule stack before editing — do not assume the rules you already loaded apply.
-- For bugs: add a regression test that fails before your change and passes after, when feasible.
-- For features: add tests covering the happy path and the obvious failure modes.
+- **Tests are mandatory at the same bar the reviewer applies** (mirrors the "Test Coverage (Mandatory)" rule in `LGTM_REVIEW_PROMPT.md`). A PR that doesn't meet this bar will be flagged on review — produce tests up-front instead of shipping debt.
+  - **Bugs** — add a regression test that fails before your change and passes after. The test must assert the corrected behaviour, not just that the code runs. "Not feasible" applies only to genuinely untestable bugs (timing/race in production, third-party flakiness, manual UI only, environment-specific) — in that case state the reason explicitly under the PR description's **Tests** section so the reviewer doesn't have to guess.
+  - **Features / new work** — tests must exercise the new behaviour with the happy path **plus at least one meaningful edge case** (error path, boundary, empty/null input). When the new code handles auth, authorization, money, data integrity, or anything security-sensitive, edge-case coverage is non-negotiable — the reviewer will treat its absence as `[CRITICAL]`.
+  - **Quality bar** — a test that calls the new code but asserts nothing meaningful (`expect(result).toBeDefined()`, snapshot-only with no behavioural assertion, fully-mocked-away) does not count. Write the test that would catch the bug or the broken edge.
+  - **No usable test framework in the repo** — do not ship the PR. Bail to the Unsuccessful path and surface the framework gap so the user can decide whether to add one. Shipping uncovered code because "the project has no tests" is not acceptable.
 - Run the project's build and test suite. Do not push code that fails to build. If tests fail and you cannot determine whether the failure is pre-existing or caused by your change, investigate before pushing.
 - Commit in logical units with descriptive messages. The first line of each commit should reference the work item: `<short summary> (#<WORK_ITEM_ID>)`.
 

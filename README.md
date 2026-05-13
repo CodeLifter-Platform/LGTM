@@ -114,6 +114,12 @@ src/
     └── tray-icon*.png       # Menu bar icons (Template for macOS, colour for Windows)
 ```
 
+## Future Enhancements
+
+Ideas considered and parked, kept here so they don't get lost:
+
+- **Chained Ticket → Review → Resolve flow.** After the ticket prompt opens a PR, optionally run the review prompt against that PR, then the resolve prompt against the resulting threads — all before handing the PR to the human. Promising in theory (one-shot end-to-end), but only worth building once the agent runner can pin **different models to each phase**: single-model self-review is weak signal because the model that wrote the code is the worst candidate to find its own blind spots, and the resolver would rubber-stamp its own review. Until per-phase model selection lands, the safer pre-flight is a self-audit step inside the ticket prompt (read your own diff against the rule stack and acceptance criteria, list weak spots under **Flags for Reviewer**), and let the next independent LGTM run drive the actual review.
+
 ## License
 
 MIT

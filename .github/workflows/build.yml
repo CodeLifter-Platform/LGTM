@@ -86,6 +86,11 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.LGTM_APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Opt in to code signing on pull_request runs. Electron-builder skips
+          # signing on PR events by default because forks can otherwise exfil
+          # signing secrets — only safe to enable when PRs are restricted to
+          # this repo (no external fork PRs).
+          CSC_FOR_PULL_REQUEST: 'true'
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
