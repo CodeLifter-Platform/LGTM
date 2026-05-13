@@ -132,6 +132,15 @@ If your team has a different convention discoverable in the repo (CONTRIBUTING.m
   - **Linked work item**: link the work item to the PR via REST (`PATCH /wit/workitems/{id}` with the JSON-Patch ArtifactLink op described in "Azure DevOps access" above) so it appears in the PR's "Work Items" tab
   - **Reviewers**: do not auto-assign reviewers unless your team's policy is documented in the repo
 
+**Markdown formatting (required for the PR description and work-item comment below).** Azure DevOps renders both fields as GitHub-flavored markdown. Make sure what you submit reads cleanly:
+
+- Use the headings from the templates (`## Summary`, `## Approach`, etc.) so the sections are scannable.
+- Fenced code blocks with language tags (`` ```ts ``, `` ```sh ``, `` ```sql ``) for any code or shell sample longer than a few characters.
+- Inline `` `code` `` for short identifiers, file paths, CLI flags, env vars.
+- Bulleted lists for change enumerations / open questions; numbered lists for ordered steps.
+- Blank lines between paragraphs so they render as paragraphs.
+- Bold sparingly, for genuine emphasis. No raw HTML; no triple-quoted plain-text dumps; no walls of unformatted prose.
+
 **PR description template:**
 
 ```markdown

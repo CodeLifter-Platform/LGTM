@@ -38,6 +38,20 @@ How to fix it (with a code snippet if helpful).
 
 Categories: `Security` | `Bug` | `Performance` | `Error Handling` | `Architecture` | `Testing` | `Maintainability` | `Style`
 
+### Markdown formatting (required)
+
+Azure DevOps renders comment bodies as GitHub-flavored markdown. Every comment you post — line comments, summary, re-raise notes — must read cleanly in the rendered view:
+
+- Use **headings** (`##`, `###`) to break up multi-section replies; never run two distinct topics together as one prose blob.
+- Use **fenced code blocks with language tags** for code samples (`` ```ts ``, `` ```sh ``, `` ```python ``). Avoid inlining multi-line code as plain text.
+- Use **inline `code`** for short identifiers, file names, CLI flags, env vars.
+- Use **bulleted lists** for enumerations and **numbered lists** for sequences. Don't pack a list into a paragraph with commas.
+- Use **bold** for genuine emphasis only, sparingly. Italics rarely.
+- Put **blank lines between paragraphs** so they actually render as paragraphs, not one wall of text.
+- **No raw HTML**, no triple-quoted plain-text dumps, no escape-character soup.
+
+Single-sentence replies are fine when that's all the context warrants — anything multi-paragraph must use markdown.
+
 ## Re-Review Rules (Critical)
 
 When reviewing a PR that has been reviewed before, you MUST follow these rules strictly:

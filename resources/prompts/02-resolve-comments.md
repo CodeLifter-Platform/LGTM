@@ -81,6 +81,30 @@ For each open thread, in order:
 
 ### 4. Per-action requirements
 
+#### Comment-then-resolve discipline (mandatory for every thread)
+
+For every thread you touch — Fix, Won't fix, or Cannot resolve — follow this order **strictly**:
+
+1. **Post the reply comment first** via `POST .../threads/{threadId}/comments`. Wait for a 2xx with a returned comment ID.
+2. **Then** update thread status via `PATCH .../threads/{threadId}`, but only when the work is genuinely completed.
+
+A thread is "completed" — and therefore eligible for `fixed` / `wontFix` status — when the action you took is final: the code change is committed (Fix), or the decision-with-reasoning is recorded (Won't fix). A thread is **not** completed when you couldn't act (Cannot resolve); leave it `active`.
+
+Never resolve a thread without leaving a comment in the same pass. Never PATCH status before the comment is posted — your reasoning must land in the thread before the close. If the comment POST fails, do not PATCH status; surface the failure in the final report.
+
+#### Markdown formatting (required)
+
+Thread replies render as GitHub-flavored markdown in Azure DevOps. Make sure what you post reads cleanly:
+
+- **Headings** (`##`, `###`) to break up multi-section replies (e.g. "Fix" + "Tests added" + "Open questions").
+- **Fenced code blocks with language tags** (`` ```ts ``, `` ```sh ``, `` ```sql ``) for any code or shell sample.
+- Inline `` `code` `` for short identifiers, file paths, CLI flags.
+- Bulleted / numbered lists for enumerations and sequences (not comma-packed paragraphs).
+- Blank lines between paragraphs so they render as paragraphs.
+- Bold sparingly; no raw HTML; no plain-text dumps inside triple quotes.
+
+A one-line reply is fine when that's all the context warrants — anything multi-paragraph must use markdown.
+
 **Fix:**
 
 - Make the smallest correct change that resolves the comment. Do not opportunistically refactor adjacent code.
