@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, shell, dialog } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, shell, dialog, Notification } = require('electron');
 const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const os = require('os');
@@ -73,9 +73,39 @@ autoUpdater.autoDownload = false;       // Don't download until user says so
 autoUpdater.autoInstallOnAppQuit = true;
 autoUpdater.logger = console;
 
+/**
+ * Show a native OS notification that opens the tray window when clicked.
+ * No-op when the OS doesn't support notifications (rare). We hold a
+ * reference for the lifetime of the notification because GC can drop
+ * it mid-flight on some platforms otherwise.
+ */
+let activeUpdateNotification = null;
+function notifyUpdate(title, body) {
+  if (!Notification.isSupported()) return;
+  if (activeUpdateNotification) {
+    try { activeUpdateNotification.close(); } catch { /* ignore */ }
+  }
+  const n = new Notification({ title, body, silent: false });
+  n.on('click', () => {
+    if (!mainWindow) return;
+    if (!mainWindow.isVisible()) {
+      try { positionWindowByTray(); } catch { /* ignore — tray not ready */ }
+      mainWindow.show();
+    }
+    mainWindow.focus();
+  });
+  n.show();
+  activeUpdateNotification = n;
+}
+
 function initAutoUpdater() {
   autoUpdater.on('update-available', (info) => {
     console.log('[LGTM] Update available:', info.version);
+    // Native OS alert — visible even with the tray window hidden, which
+    // is the default state of this app on macOS (dock hidden, tray-only).
+    notifyUpdate('LGTM update available', `Version ${info.version} is ready to download.`);
+    // Tray tooltip — persistent indicator after the notification fades.
+    if (tray) tray.setToolTip(`LGTM — Update v${info.version} available`);
     if (mainWindow) {
       mainWindow.webContents.send('update-available', {
         version: info.version,
@@ -99,6 +129,8 @@ function initAutoUpdater() {
 
   autoUpdater.on('update-downloaded', () => {
     console.log('[LGTM] Update downloaded, ready to install');
+    notifyUpdate('LGTM update ready', 'Click to open LGTM and restart to install.');
+    if (tray) tray.setToolTip('LGTM — Update ready to install');
     if (mainWindow) mainWindow.webContents.send('update-downloaded');
   });
 
