@@ -1,0 +1,115 @@
+name: iOS (iPad)
+
+# Builds the native iPad head under ios/.
+#
+# Without signing secrets it does an UNSIGNED simulator build (always green, so
+# forks and routine pushes still get a compile check). When the App Store Connect
+# API-key secrets are present it does a SIGNED device archive, which is the real
+# proof that signing resolves under the project's DEVELOPMENT_TEAM.
+#
+# Signing uses an App Store Connect API key (issuer + key id + .p8) rather than an
+# Apple ID + app-specific password: the key is owned by the org (e.g. CodeLifter
+# LLC), isn't tied to a person, needs no 2FA in CI, and signs + uploads with one
+# credential. The team itself is NOT hardcoded here — it comes from
+# ios/project.yml's DEVELOPMENT_TEAM, so this same workflow signs LGTM under its
+# team and Reps under the CodeLifter LLC team without edits.
+#
+# Required repo secrets for the signed path (App Store Connect → Users and Access
+# → Integrations → App Store Connect API):
+#   ASC_KEY_ID      the key's Key ID
+#   ASC_ISSUER_ID   the team's Issuer ID
+#   ASC_KEY_P8      base64 of the AuthKey_<KeyID>.p8  (base64 -i AuthKey_XXX.p8 | pbcopy)
+
+on:
+  push:
+    branches: ['**']
+    paths: ['ios/**', '.github/workflows/ios.yml']
+  pull_request:
+    branches: [main]
+    paths: ['ios/**', '.github/workflows/ios.yml']
+  workflow_dispatch:
+
+jobs:
+  build-ipad:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: ios
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select latest stable Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      # ── Unsigned simulator build — runs when no signing key is configured ──────
+      - name: Build (simulator, unsigned)
+        if: env.ASC_KEY_ID == ''
+        run: |
+          echo "::notice::ASC_KEY_ID not set — building unsigned for the simulator."
+          xcodebuild -project LGTM.xcodeproj -scheme LGTM \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      # ── Signed device archive — runs when the API key is configured ───────────
+      - name: Install App Store Connect API key
+        if: env.ASC_KEY_ID != ''
+        run: |
+          KEYDIR="$HOME/.appstoreconnect/private_keys"
+          mkdir -p "$KEYDIR"
+          echo "$ASC_KEY_P8" | base64 --decode > "$KEYDIR/AuthKey_${ASC_KEY_ID}.p8"
+
+      - name: Archive (device, signed)
+        if: env.ASC_KEY_ID != ''
+        run: |
+          xcodebuild -project LGTM.xcodeproj -scheme LGTM \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/LGTM.xcarchive \
+            -authenticationKeyPath "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            -allowProvisioningUpdates \
+            archive
+
+      - name: Upload archive
+        if: env.ASC_KEY_ID != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: LGTM-ipad-archive
+          path: ios/build/LGTM.xcarchive
+          if-no-files-found: error
+
+      # ── Optional: export a distributable .ipa for TestFlight/App Store ────────
+      # Enable once the app record exists in App Store Connect. method must match
+      # how you ship: app-store-connect (TestFlight/App Store) or development /
+      # release-testing (ad-hoc). Team is read from the archive, no hardcoding.
+      #
+      # - name: Export IPA
+      #   if: env.ASC_KEY_ID != ''
+      #   run: |
+      #     cat > ExportOptions.plist <<'PLIST'
+      #     <?xml version="1.0" encoding="UTF-8"?>
+      #     <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+      #     <plist version="1.0"><dict>
+      #       <key>method</key><string>app-store-connect</string>
+      #       <key>signingStyle</key><string>automatic</string>
+      #     </dict></plist>
+      #     PLIST
+      #     xcodebuild -exportArchive \
+      #       -archivePath build/LGTM.xcarchive \
+      #       -exportPath build/export \
+      #       -exportOptionsPlist ExportOptions.plist \
+      #       -authenticationKeyPath "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8" \
+      #       -authenticationKeyID "$ASC_KEY_ID" \
+      #       -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+      #       -allowProvisioningUpdates
