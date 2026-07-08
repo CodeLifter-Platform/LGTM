@@ -1,0 +1,60 @@
+name: LGTM
+options:
+  bundleIdPrefix: net.codelifter
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    # Apple Development team (Andrew Palmer) — used for on-device signing.
+    DEVELOPMENT_TEAM: LB4BQYZ349
+    CODE_SIGN_STYLE: Automatic
+    # iPad only.
+    TARGETED_DEVICE_FAMILY: "2"
+
+targets:
+  LGTM:
+    type: application
+    platform: iOS
+    sources:
+      - path: LGTM
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: net.codelifter.lgtm
+        PRODUCT_NAME: LGTM
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+    info:
+      path: LGTM/Info.plist
+      properties:
+        CFBundleDisplayName: LGTM
+        UILaunchScreen: {}
+        ITSAppUsesNonExemptEncryption: false
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+
+  LGTMTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: LGTM
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: true
+
+schemes:
+  LGTM:
+    build:
+      targets:
+        LGTM: all
+        LGTMTests: [test]
+    test:
+      targets:
+        - LGTMTests
