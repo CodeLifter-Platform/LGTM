@@ -3,7 +3,7 @@ name: iOS (iPad)
 # Builds the native iPad head under ios/.
 #
 # Without signing secrets it does an UNSIGNED simulator build (always green, so
-# forks and routine pushes still get a compile check). When the App Store Connect
+# a dispatch still gets a compile check without them). When the App Store Connect
 # API-key secrets are present it does a SIGNED device archive, which is the real
 # proof that signing resolves under the project's DEVELOPMENT_TEAM.
 #
@@ -20,13 +20,13 @@ name: iOS (iPad)
 #   ASC_ISSUER_ID   the team's Issuer ID
 #   ASC_KEY_P8      base64 of the AuthKey_<KeyID>.p8  (base64 -i AuthKey_XXX.p8 | pbcopy)
 
+# ── Cost model ────────────────────────────────────────────────────
+# Dispatch-only: every job here (even the unsigned simulator build) runs on a
+# macOS runner, which bills at 10x. Trigger manually from the Actions tab when
+# you need an iOS compile check or a signed archive.
+# ──────────────────────────────────────────────────────────────────
+
 on:
-  push:
-    branches: ['**']
-    paths: ['ios/**', '.github/workflows/ios.yml']
-  pull_request:
-    branches: [main]
-    paths: ['ios/**', '.github/workflows/ios.yml']
   workflow_dispatch:
 
 jobs:
