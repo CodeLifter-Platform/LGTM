@@ -1,18 +1,51 @@
 # How to Release LGTM
 
-## How Versioning Works
+## TL;DR — release locally, for $0
 
-Every push triggers a build. The version is fully automatic:
+Day-to-day releases happen from a dev Mac, not from CI:
+
+```bash
+./scripts/release-local.sh
+```
+
+The script builds, signs (and notarizes when the Apple env vars are exported —
+values in 1Password), inserts the README release-history row, commits
+`chore: release <version> [skip ci]` with the stamped `package.json` /
+`package-lock.json`, tags, pushes, and publishes a GitHub Release with
+generated notes and the `dist/*.dmg`, `dist/*.zip`, and `dist/latest-mac.yml`
+artifacts — exactly the bookkeeping the CI release job produces, without
+spending a single Actions minute.
+
+## Why CI doesn't build on every push anymore
+
+macOS runners bill at **10x** and Windows at **2x**. Routine pushes and PRs
+now run only the cheap ubuntu `version` job. The full pipeline
+(`build-mac` + `build-windows` + `release`) is **dispatch-only**: trigger it
+manually from [Actions → Build & Release](https://github.com/CodeLifterIO/LGTM/actions/workflows/build.yml)
+when you need CI-built artifacts (e.g. the Windows installers, which the
+local script doesn't build). A dispatch on `main` publishes a real release;
+a dispatch on any other branch produces artifact-only prerelease builds.
+
+The iOS workflow (`.github/workflows/ios.yml`) is dispatch-only for the same
+reason — even its simulator build runs on a 10x macOS runner.
+
+## How Versioning Works
 
 | Component | Source | You touch it? |
 |-----------|--------|---------------|
 | **Major.Minor** | GitHub Actions variable `BASE_VERSION` | Only when bumping minor or major |
-| **Patch** | `GITHUB_RUN_NUMBER` (auto-increments) | Never |
+| **Patch** | Local script: highest existing `v<BASE>.N` tag + 1. CI: `GITHUB_RUN_NUMBER` | Never |
+| **Suffix** | GitHub Actions variable `RELEASE_LEVEL` (`alpha` / `beta` / `rc`, unset = stable) | Only for prerelease lines |
 
 ### Version format
 
-- **Push to main:** `1.6.7` — creates a tag, builds installers, publishes a GitHub Release
-- **Push to any other branch / PR:** `1.6.7-pre.7+abc1234` — builds only, no release
+- **Local release / dispatch on main:** `1.6.7` — tag, installers, GitHub Release
+  (with `RELEASE_LEVEL=beta`: `1.6.7-beta`, published as a GitHub *prerelease*)
+- **Push to any branch / PR:** version job only, `1.6.7-pre.7+abc1234`, nothing built
+- **Dispatch on another branch:** `1.6.7-pre.7+abc1234` — builds artifacts, no release
+
+`RELEASE_LEVEL` is a workflow capability only — LGTM ships stable versions, so
+leave the variable unset unless you deliberately start a prerelease line.
 
 ### Example version progression on main
 
@@ -24,25 +57,36 @@ Every push triggers a build. The version is fully automatic:
 1.7.51  →  1.7.52  →  1.7.53  →  ...
 ```
 
-The patch number never resets — it's a global build counter. This is intentional: it makes every version globally unique and traceable.
+The patch number never resets. Don't mix local and CI releases within one
+`BASE_VERSION` unless you're sure the CI run counter is behind the tags —
+the two counters are independent.
 
 ## Day-to-Day Workflow
 
-Just push code. That's it.
-
 ```bash
-git push origin my-feature-branch   # → builds 1.6.7-pre.7+abc1234
-# merge PR to main
-# → builds 1.6.8, tags v1.6.8, publishes release
+git push origin my-feature-branch   # → cheap version job only, no paid runners
+# merge PR to main                  # → still no paid runners
+./scripts/release-local.sh          # → v1.6.8 released from your Mac, $0
 ```
+
+### Local release prerequisites
+
+- `gh` CLI authenticated with push access to the repo
+- **Signing:** a `Developer ID Application` certificate in your login keychain —
+  electron-builder auto-discovers it (no env vars). Missing → unsigned build, loud warning.
+- **Notarization:** export `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and
+  `APPLE_TEAM_ID` (values in 1Password) before running. electron-builder cannot
+  read `notarytool` keychain profiles, so the profile alone isn't enough. Missing →
+  signed-but-unnotarized build, loud warning. The script never fails on this.
 
 ## Bumping the Version
 
 When you're ready for a new minor or major:
 
 1. Go to **Settings → Secrets and variables → Actions → Variables** tab
+   (or `gh variable set BASE_VERSION --body "1.7"`)
 2. Edit `BASE_VERSION` (e.g., change `1.6` to `1.7` or `2.0`)
-3. Next push to main picks up the new base: `1.7.<next_run>`
+3. The next release (local or dispatched) picks up the new base
 
 That's the only manual step in the entire release process.
 
@@ -55,14 +99,15 @@ Create the `BASE_VERSION` variable if it doesn't exist yet:
 3. Click **New repository variable**
 4. Name: `BASE_VERSION`, Value: `1.0`
 
-## Manual Build Without Release
+## Manual CI Build (workflow_dispatch)
 
-To test builds without creating a release:
+To run the full CI pipeline — the only way heavy jobs run now:
 
 1. Go to [Actions → Build & Release](https://github.com/CodeLifterIO/LGTM/actions/workflows/build.yml)
 2. Click **Run workflow**
-3. Select the branch
-4. Download artifacts from the workflow run (prerelease version, no GitHub Release created)
+3. Select the branch — `main` publishes a release; any other branch produces
+   artifact-only prerelease builds
+4. Download artifacts from the workflow run
 
 ## What Gets Built
 
