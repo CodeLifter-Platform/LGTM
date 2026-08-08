@@ -144,8 +144,25 @@ function initAutoUpdater() {
 }
 
 // ── Single-instance lock ─────────────────────────────────────────────
+// On macOS and Windows the tray is a dependable entry point, so the window can be a
+// frameless popover hanging off it. On Linux it is not: tray support varies by desktop
+// (GNOME needs an extension) and Electron's tray.getBounds() is unsupported there, so a
+// tray-only app can end up with no way to open it at all. Linux therefore gets an
+// ordinary window — framed, in the taskbar, shown at launch.
+const TRAY_ONLY = process.platform === 'darwin' || process.platform === 'win32';
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) { app.quit(); }
+
+// Relaunching from the launcher should surface the existing instance rather than
+// silently doing nothing. This matters most on Linux: closing the window only hides it,
+// and without a dependable tray icon that would otherwise leave the app unreachable.
+app.on('second-instance', () => {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+});
 
 /**
  * Cheapest authenticated round-trip against Azure DevOps. Hits
@@ -242,8 +259,18 @@ app.whenReady().then(async () => {
     }
   }
 
-  createTray();
+  // A tray failure must never take the app down with it. On macOS/Windows that would be
+  // fatal anyway (the tray is the only entry point), but on Linux the window stands on
+  // its own, so a desktop without tray support should degrade to a normal app.
+  try {
+    createTray();
+  } catch (err) {
+    if (TRAY_ONLY) throw err;
+    console.warn('[LGTM] tray unavailable on this desktop — continuing without it:', err.message);
+  }
   createWindow();
+  // Linux has no dependable tray to click, so the window has to appear on its own.
+  if (!TRAY_ONLY) { mainWindow.show(); mainWindow.focus(); }
   initAutoUpdater();
 
   // Kick off background model discovery — non-blocking. UI shows the
@@ -312,10 +339,10 @@ function createWindow() {
     width: 960,
     height: 700,
     show: false,
-    frame: false,
+    frame: !TRAY_ONLY,
     resizable: true,
-    skipTaskbar: true,
-    alwaysOnTop: true,
+    skipTaskbar: TRAY_ONLY,
+    alwaysOnTop: TRAY_ONLY,
     minWidth: 760,
     minHeight: 400,
     webPreferences: {
@@ -327,9 +354,13 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 
-  mainWindow.on('blur', () => {
-    if (!mainWindow.webContents.isDevToolsOpened()) mainWindow.hide();
-  });
+  // Hide-on-blur is popover behaviour. On a normal windowed app it makes the window
+  // vanish the moment you click anything else, so it stays off on Linux.
+  if (TRAY_ONLY) {
+    mainWindow.on('blur', () => {
+      if (!mainWindow.webContents.isDevToolsOpened()) mainWindow.hide();
+    });
+  }
 
   mainWindow.on('close', (e) => {
     if (!app.isQuitting) { e.preventDefault(); mainWindow.hide(); }
@@ -342,6 +373,9 @@ function toggleWindow() {
 }
 
 function positionWindowByTray() {
+  // tray.getBounds() is macOS/Windows only; on Linux it returns zeroes, which would
+  // park the window off-screen. Centre instead.
+  if (!TRAY_ONLY || !tray) { mainWindow.center(); return; }
   const trayBounds = tray.getBounds();
   const winBounds = mainWindow.getBounds();
   const x = Math.round(trayBounds.x + trayBounds.width / 2 - winBounds.width / 2);
