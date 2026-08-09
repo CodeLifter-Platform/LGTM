@@ -10,7 +10,9 @@
     "build:win": "electron-builder --win",
     "build:win:dir": "electron-builder --win --dir",
     "build:all": "electron-builder --mac --win",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "electron-builder install-app-deps",
+    "build:linux": "electron-builder --linux",
+    "build:linux:dir": "electron-builder --linux --dir"
   },
   "build": {
     "appId": "com.lgtm.app",
@@ -55,7 +57,7 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "CodeLifterIO",
+        "owner": "CodeLifter-Platform",
         "repo": "LGTM"
       }
     ],
@@ -72,7 +74,21 @@
         "from": "resources/prompts",
         "to": "prompts"
       }
-    ]
+    ],
+    "linux": {
+      "icon": "resources/icon.png",
+      "category": "Development",
+      "synopsis": "Azure DevOps pull request reviewer",
+      "artifactName": "LGTM-${arch}.${ext}",
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "desktop": {
+        "StartupWMClass": "LGTM"
+      },
+      "maintainer": "CodeLifter LLC <a@codelifter.net>"
+    }
   },
   "dependencies": {
     "axios": "^1.7.0",

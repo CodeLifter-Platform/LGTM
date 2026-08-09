@@ -51,3 +51,7 @@ ios/LGTM/Info.plist
 **/xcuserdata/
 *.xcworkspace/xcuserdata/
 DerivedData/
+
+# Core dumps from emulated-container packaging tests
+core
+qemu_*.core
