@@ -5,6 +5,11 @@
 > automatically via the folder-level CLAUDE.md symlink; otherwise
 > `github.com/CodeLifter-Platform/Platform-Standards`). If that file isn't on disk —
 > CI, cloud, or a lone clone — fetch it before doing UI, architecture, or CI work.
+>
+> **Design system:** new UI is built from the claude.ai/design project **CodeLifter Design
+> System** (read it with `DesignSync`). If it doesn't have the component, token, accent, or
+> pattern the work needs, stop and ask for it to be added — don't invent or approximate one.
+> Rules: `Platform-Standards/design/design-system.md`.
 
 <!-- App-specific rules only. Platform-wide standards live in the harness. -->
 

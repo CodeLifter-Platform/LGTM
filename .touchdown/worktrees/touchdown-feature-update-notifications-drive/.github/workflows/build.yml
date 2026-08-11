@@ -1,0 +1,230 @@
+name: Build & Release
+
+on:
+  push:
+    branches: ['**']       # Build on all branch pushes
+  pull_request:
+    branches: [main]       # Build on PRs targeting main
+  workflow_dispatch:        # Allow manual trigger
+
+permissions:
+  contents: write          # Needed to create releases, tags, and push version commits
+
+# ── Version strategy ──────────────────────────────────────────────
+#
+#   BASE_VERSION → GitHub Actions variable (e.g. "1.6")
+#                  Set in repo Settings → Variables → Actions
+#   PATCH        → GITHUB_RUN_NUMBER (auto-increments every run)
+#
+#   main branch:    1.6.1, 1.6.2, 1.6.3 …  (clean releases)
+#   other branches: 1.6.1-pre.42+abc1234    (prerelease)
+#
+# To bump minor/major:
+#   1. Go to Settings → Secrets and variables → Actions → Variables
+#   2. Change BASE_VERSION (e.g. "1.7" or "2.0")
+#   3. Next push to main becomes 1.7.<next_run> etc.
+# ──────────────────────────────────────────────────────────────────
+
+jobs:
+  # ── Generate version number ────────────────────────────────────
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.semver.outputs.version }}
+      version_tag: ${{ steps.semver.outputs.version_tag }}
+      is_release: ${{ steps.semver.outputs.is_release }}
+    steps:
+      - name: Generate semantic version
+        id: semver
+        run: |
+          BASE="${{ vars.BASE_VERSION || '1.0' }}"
+          PATCH="${{ github.run_number }}"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          IS_MAIN="${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}"
+
+          if [ "$IS_MAIN" = "true" ]; then
+            VERSION="${BASE}.${PATCH}"
+            IS_RELEASE="true"
+          else
+            VERSION="${BASE}.${PATCH}-pre.${GITHUB_RUN_NUMBER}+${SHORT_SHA}"
+            IS_RELEASE="false"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "is_release=$IS_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "### Version: \`${VERSION}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Release: ${IS_RELEASE}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── macOS build ────────────────────────────────────────────────
+  build-mac:
+    needs: version
+    runs-on: macos-latest
+    env:
+      APP_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Stamp version into package.json
+        run: npm version "$APP_VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Build macOS installer
+        run: npx electron-builder --mac --publish never
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.LGTM_APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Opt in to code signing on pull_request runs. Electron-builder skips
+          # signing on PR events by default because forks can otherwise exfil
+          # signing secrets — only safe to enable when PRs are restricted to
+          # this repo (no external fork PRs).
+          CSC_FOR_PULL_REQUEST: 'true'
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lgtm-mac
+          path: |
+            dist/*.dmg
+            dist/*.zip
+          if-no-files-found: error
+
+      - name: Upload macOS update metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: lgtm-mac-update
+          path: dist/latest-mac.yml
+          if-no-files-found: warn
+
+  # ── Windows build ──────────────────────────────────────────────
+  build-windows:
+    needs: version
+    runs-on: windows-latest
+    env:
+      APP_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Stamp version into package.json
+        run: npm version "$env:APP_VERSION" --no-git-tag-version --allow-same-version
+        shell: pwsh
+
+      - name: Build Windows installer
+        run: npx electron-builder --win --publish never
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lgtm-windows
+          path: dist/*.exe
+          if-no-files-found: error
+
+      - name: Upload Windows update metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: lgtm-win-update
+          path: dist/latest.yml
+          if-no-files-found: warn
+
+  # ── Release (main branch only) ─────────────────────────────────
+  release:
+    if: needs.version.outputs.is_release == 'true'
+    needs: [version, build-mac, build-windows]
+    runs-on: ubuntu-latest
+    env:
+      APP_VERSION: ${{ needs.version.outputs.version }}
+      VERSION_TAG: ${{ needs.version.outputs.version_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Stamp version into package.json
+        run: npm version "$APP_VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Update release history in README
+        run: |
+          RELEASE_DATE=$(date -u +"%Y-%m-%d")
+          REPO_URL="https://github.com/CodeLifterIO/LGTM"
+          NEW_ROW="| ${VERSION_TAG} | ${RELEASE_DATE} | [dmg](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-arm64.dmg) · [zip](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-arm64.zip) | [installer](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-Setup.exe) · [portable](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-Portable.exe) | [Release notes](${REPO_URL}/releases/tag/${VERSION_TAG}) |"
+          awk -v row="$NEW_ROW" '/\|[-]+\|[-]+\|[-]+\|[-]+\|[-]+\|/{print; print row; next} {print}' README.md > README.tmp && mv README.tmp README.md
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json README.md
+          git diff --cached --quiet || git commit -m "chore: bump version to ${APP_VERSION} [skip ci]"
+          git tag "$VERSION_TAG"
+          git push origin main --tags
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: lgtm-mac
+          path: dist
+
+      - name: Download macOS update metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: lgtm-mac-update
+          path: dist
+        continue-on-error: true
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: lgtm-windows
+          path: dist
+
+      - name: Download Windows update metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: lgtm-win-update
+          path: dist
+        continue-on-error: true
+
+      - name: List release files
+        run: ls -lhR dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION_TAG }}
+          name: "LGTM ${{ env.VERSION_TAG }}"
+          draft: false
+          generate_release_notes: true
+          files: |
+            dist/**/*.dmg
+            dist/**/*.zip
+            dist/**/*.exe
+            dist/latest-mac.yml
+            dist/latest.yml

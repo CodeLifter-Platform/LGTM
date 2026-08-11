@@ -26,4 +26,4 @@ Last reviewed: 2026-07-18.
 - **Usage:** Developer ID signing + notarization of the packaged Electron app.
 - **Managed at:** CodeLifter-Platform **org secrets** (`LGTM_APPLE_APP_SPECIFIC_PASSWORD`
   was first created here).
-- **Detail:** [docs/MAC_CODE_SIGNING.md](docs/MAC_CODE_SIGNING.md).
+- **Detail:** [..Documentation/MAC_CODE_SIGNING.md](..Documentation/MAC_CODE_SIGNING.md).

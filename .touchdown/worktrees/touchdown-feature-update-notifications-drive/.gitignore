@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+out/
+
+# Electron-builder cache
+.electron-builder-cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment / secrets
+.env
+.env.*
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# electron-store config (contains user settings, not secrets)
+# config.json is stored in OS app data, not here — but just in case:
+config.json
+
+# Package lock (optional — remove this line if you want to pin deps)
+# package-lock.json
+
+# Legacy subfolder (safe to delete)
+lgtm-app/
