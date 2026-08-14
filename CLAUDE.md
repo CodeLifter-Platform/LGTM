@@ -6,10 +6,12 @@
 > `github.com/CodeLifter-Platform/Platform-Standards`). If that file isn't on disk —
 > CI, cloud, or a lone clone — fetch it before doing UI, architecture, or CI work.
 >
-> **Design system:** new UI is built from the claude.ai/design project **CodeLifter Design
-> System** (read it with `DesignSync`). If it doesn't have the component, token, accent, or
-> pattern the work needs, stop and ask for it to be added — don't invent or approximate one.
-> Rules: `Platform-Standards/design/design-system.md`.
+> **Design system:** new UI is built from the **CodeLifter Design System** in the sibling
+> `Platform-Design` repo (`../Platform-Design/readme.md` locally; otherwise
+> `github.com/CodeLifter-Platform/Platform-Design`). Read `readme.md`, then `tokens/`, then
+> the component's `.prompt.md` — before any markup. If it doesn't have the component, token,
+> accent, or pattern the work needs, stop and ask for it to be added — don't invent or
+> approximate one. Rules: `Platform-Standards/design/design-system.md`.
 
 <!-- App-specific rules only. Platform-wide standards live in the harness. -->
 
