@@ -30,7 +30,10 @@ past the 0.9 line. This repo is **public**.
 - **Auto-update** via `electron-updater`, with native notifications on update available
   and update ready.
 - **Credential storage in the OS keychain** via `keytar`, which uses libsecret on Linux —
-  so unlike Specter and Reps, LGTM already had a working Linux secret backend.
+  so unlike Specter and Reps, LGTM already had a working Linux secret backend. The
+  keychain is the only store: a refusal is reported to the user, not papered over with a
+  file (versions before 0.6 kept an obfuscated file copy; it is migrated and emptied on
+  first read).
 
 ## Architecture
 
@@ -42,11 +45,22 @@ Electron, main process in `src/main/`:
 | `devops-client.js` | Azure DevOps API |
 | `agent-runner.js`, `agent-registry.js` | Review execution and agent catalogue |
 | `prompt-resolver.js`, `prompt-attachments.js`, `scenario-prompts.js` | Prompt construction |
-| `pat-store.js` | PAT persistence via keytar |
+| `pat-store.js` | PAT persistence via keytar (keychain only; legacy file drained on read) |
+| `settings.js` | Every `config.json` key, its default, the corrupt-file guard |
+| `devops-session.js`, `pr-poller.js` | The per-PAT lifetime: client, poller, webhook; replaced on re-validate, stopped on clear |
+| `core/` | Pure pieces main.js and the runner share: org URL parsing, prompt builders, PAT validation mapping |
 | `repo-cloner.js`, `webhook-server.js`, `model-discovery.js` | Supporting services |
 
-Renderer in `src/renderer/`, preload bridge in `src/main/preload.js` with
+Renderer in `src/renderer/` (`app.js` owns the DOM; `logic.js` holds the DOM-free
+decisions and is the part under test), preload bridge in `src/main/preload.js` with
 `contextIsolation: true` and `nodeIntegration: false`.
+
+## Tests
+
+`npm test` runs the suite under `tests/` on the built-in Node runner; CI runs it on ubuntu
+for every push and PR and on the macOS and Windows legs before packaging. The iPad head
+has its own XCTest target (`ios/Tests`), run by `ios.yml` on dispatch. What is covered,
+what is deliberately not, and why: `CLAUDE.md` → Testing.
 
 ## Window model — and why it differs per platform
 
@@ -62,9 +76,11 @@ is caught and logged rather than fatal. All of this is behind a `TRAY_ONLY` flag
 
 ## Data and state
 
-`electron-store` for configuration (org URL, webhook port, polling interval, agent and
-model selections, per-repo prompt configuration, starred repos, filters). The **Azure
-DevOps PAT lives in the OS keychain** via keytar, never in the config store.
+`electron-store` for configuration (org URL, webhook port and bind host, polling interval,
+agent and model selections, per-repo prompt configuration, starred repos, filters); a
+corrupt `config.json` is reset to defaults rather than blocking the launch. The **Azure
+DevOps PAT lives in the OS keychain** via keytar, never in the config store. The webhook
+server listens on loopback by default and caps request bodies.
 
 ## External services
 

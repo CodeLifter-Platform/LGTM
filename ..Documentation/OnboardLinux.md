@@ -55,6 +55,8 @@ cannot auto-update a `.deb`, so it is the only Linux format where updates keep w
   fails with a bare `tar failed (exit code 2)` without it. `ubuntu-latest` has it; slim
   containers do not.
 - **`keytar` needs libsecret and a running keyring.** Without them, credential storage
-  fails at runtime rather than at install.
+  fails at runtime rather than at install: LGTM reports that the PAT could not be saved
+  and keeps it in memory for the session, so you re-enter it on the next launch. There
+  is no file fallback by design.
 - **Tray icons are unreliable.** GNOME needs an extension. If no tray icon appears, that is
   expected — use the window, which is why it exists.

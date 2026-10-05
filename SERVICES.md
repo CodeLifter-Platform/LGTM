@@ -5,14 +5,15 @@ file in the same change that adds, removes, or reconfigures a service. Platform-
 map: `Platform-Standards/services/registry.md` (sibling repo,
 github.com/CodeLifter-Platform/Platform-Standards).
 
-Last reviewed: 2026-07-18.
+Last reviewed: 2026-10-05.
 
 ## Azure DevOps
 
 - **Usage:** The PR source LGTM reviews — pull requests, diffs, comment posting via the
   Azure DevOps REST API.
 - **Managed at:** The end user's Azure DevOps organization; PAT supplied by the user at
-  runtime (stored in OS secure storage, never in config).
+  runtime (stored in the OS keychain via keytar and nowhere else; a refusing keychain is
+  reported, and the pre-0.6 obfuscated file copy is migrated out on first read).
 
 ## Anthropic / OpenAI (model APIs)
 
