@@ -2,16 +2,21 @@ name: Build & Release
 
 on:
   push:
-    branches: ['**']       # Cheap path: version job only
+    branches: ['**']       # Cheap path: version + test jobs only
   pull_request:
     branches: [main]       # Same cheap path for PRs
   workflow_dispatch:        # Full pipeline (mac + windows + release) on demand
 
 # ── Cost model ────────────────────────────────────────────────────
 # macOS runners bill at 10x and Windows at 2x, so pushes/PRs run ONLY the
-# ubuntu version job (fits in the org's free included minutes). The heavy
-# build/release jobs run on manual dispatch — day-to-day releases happen
-# for free from a dev Mac via scripts/release-local.sh.
+# ubuntu version and test jobs (fits in the org's free included minutes).
+# The heavy build/release jobs run on manual dispatch — day-to-day releases
+# happen for free from a dev Mac via scripts/release-local.sh.
+#
+# Tests (Platform-Standards/process/testing.md): the Node suite under tests/
+# runs on ubuntu on every push and PR with coverage printed into the job
+# summary, and again on each build leg's own OS before electron-builder
+# packages anything, with that leg's coverage uploaded as an artifact.
 # ──────────────────────────────────────────────────────────────────
 
 permissions:
@@ -78,10 +83,50 @@ jobs:
             echo "Release: ${IS_RELEASE} · Prerelease: ${IS_PRERELEASE}"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # ── Tests (the cheap gate: every push and PR) ──────────────────
+  # The main-process modules import without Electron, so the suite runs on
+  # the plain Node runner. `--ignore-scripts` skips electron-builder's
+  # install-app-deps (and the Electron binary download) — nothing in the
+  # suite needs either.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run tests with coverage
+        shell: bash
+        run: |
+          npm run test:coverage 2>&1 | tee test-output.log
+          {
+            echo "### Test coverage (node --test)"
+            echo
+            echo '```'
+            sed -n '/start of coverage report/,/end of coverage report/p' test-output.log | sed 's/^ℹ //'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-ubuntu
+          path: coverage/
+          if-no-files-found: warn
+
   # ── macOS build (dispatch-only: macOS minutes bill 10x) ────────
   build-mac:
     if: github.event_name == 'workflow_dispatch'
-    needs: version
+    needs: [version, test]
     runs-on: macos-latest
     env:
       APP_VERSION: ${{ needs.version.outputs.version }}
@@ -92,11 +137,24 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
         run: npm ci
+
+      # The suite runs on the OS that is about to be packaged, before
+      # electron-builder touches anything (process/testing.md).
+      - name: Run tests (macOS)
+        run: npm run test:coverage
+
+      - name: Upload coverage (macOS)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-macos
+          path: coverage/
+          if-no-files-found: warn
 
       - name: Stamp version into package.json
         run: npm version "$APP_VERSION" --no-git-tag-version --allow-same-version
@@ -134,7 +192,7 @@ jobs:
   # ── Windows build (dispatch-only: Windows minutes bill 2x) ─────
   build-windows:
     if: github.event_name == 'workflow_dispatch'
-    needs: version
+    needs: [version, test]
     runs-on: windows-latest
     env:
       APP_VERSION: ${{ needs.version.outputs.version }}
@@ -145,11 +203,23 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
         run: npm ci
+
+      # Same rule as the mac leg: test on Windows before packaging for it.
+      - name: Run tests (Windows)
+        run: npm run test:coverage
+
+      - name: Upload coverage (Windows)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-windows
+          path: coverage/
+          if-no-files-found: warn
 
       - name: Stamp version into package.json
         run: npm version "$env:APP_VERSION" --no-git-tag-version --allow-same-version
@@ -175,7 +245,7 @@ jobs:
   # ── Release (dispatch on main only) ────────────────────────────
   release:
     if: github.event_name == 'workflow_dispatch' && needs.version.outputs.is_release == 'true'
-    needs: [version, build-mac, build-windows]
+    needs: [version, test, build-mac, build-windows]
     runs-on: ubuntu-latest
     env:
       APP_VERSION: ${{ needs.version.outputs.version }}
@@ -189,7 +259,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Stamp version into package.json
         run: npm version "$APP_VERSION" --no-git-tag-version --allow-same-version

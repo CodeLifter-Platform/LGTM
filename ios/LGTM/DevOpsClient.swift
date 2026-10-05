@@ -21,29 +21,46 @@ struct DevOpsClient {
         var errorDescription: String? { message }
     }
 
-    // MARK: URL parsing (mirrors DevOpsClient.parseOrgUrl)
+    // MARK: URL parsing (mirrors src/main/core/org-url.js — change both together)
 
+    /// Split a user-typed URL into the org base URL and an optional project.
+    /// A non-default port is kept (`hostname` alone would drop it and send an
+    /// on-prem server's traffic to the wrong port). Anything from the first
+    /// `_`-prefixed segment on (`_git`, `_apis`) is routing and is dropped.
+    /// On-prem: a leading `tfs` segment is the classic TFS virtual directory,
+    /// so `tfs/<Collection>` is the base and the next segment the project;
+    /// otherwise the first segment is the collection.
     static func parseOrgUrl(_ raw: String) -> (orgUrl: String, project: String?) {
-        let trimmed = raw.replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
+        let trimmed = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
         guard let u = URL(string: trimmed), let host = u.host else {
             return (trimmed, nil)
         }
-        let parts = u.pathComponents.filter { $0 != "/" && !$0.isEmpty }
         let scheme = u.scheme ?? "https"
+        let hostPort = u.port.map { "\(host):\($0)" } ?? host
+        let base = "\(scheme)://\(hostPort)"
+        let parts = u.pathComponents.filter { $0 != "/" && !$0.isEmpty }
+        let segs: [String]
+        if let routeIdx = parts.firstIndex(where: { $0.hasPrefix("_") }) {
+            segs = Array(parts[..<routeIdx])
+        } else {
+            segs = parts
+        }
 
         if host == "dev.azure.com" {
-            let org = parts.first ?? ""
-            let project = parts.count > 1 ? parts[1] : nil
-            return ("\(scheme)://\(host)/\(org)", project)
+            let org = segs.first ?? ""
+            let project = segs.count > 1 ? segs[1] : nil
+            return ("\(base)/\(org)", project)
         }
         if host.hasSuffix(".visualstudio.com") {
-            let project = parts.first
-            return ("\(scheme)://\(host)", project)
+            return (base, segs.first)
         }
-        // On-prem / unknown — first segment is the collection, second the project.
-        let project = parts.count >= 2 ? parts[1] : nil
-        let basePath = parts.count >= 1 ? "/\(parts[0])" : ""
-        return ("\(scheme)://\(host)\(basePath)", project)
+        // On-prem / unknown host.
+        let baseLen = (segs.first?.lowercased() == "tfs" && segs.count >= 2) ? 2 : 1
+        let basePath = segs.prefix(baseLen).map { "/\($0)" }.joined()
+        let project = segs.count > baseLen ? segs[baseLen] : nil
+        return ("\(base)\(basePath)", project)
     }
 
     var orgHost: String { URL(string: orgUrl)?.host ?? "" }
