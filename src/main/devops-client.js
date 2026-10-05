@@ -16,6 +16,7 @@ const azdev = require('azure-devops-node-api');
 const gitInterfaces = require('azure-devops-node-api/interfaces/GitInterfaces');
 const witInterfaces = require('azure-devops-node-api/interfaces/WorkItemTrackingInterfaces');
 const policyInterfaces = require('azure-devops-node-api/interfaces/PolicyInterfaces');
+const { parseOrgUrl } = require('./core/org-url');
 
 // Helpers
 const toIso = (d) => {
@@ -27,15 +28,24 @@ class DevOpsClient {
   /**
    * @param {string} pat
    * @param {string} orgUrl - May include a project path; we strip it into projectFilter.
+   * @param {object} [opts]
+   * @param {object} [opts.connection] - a WebApi-shaped connection (getCoreApi/getGitApi/…);
+   *   tests inject a fake here to exercise the mapping without the SDK's HTTP layer.
+   * @param {object} [opts.http]       - axios-shaped client for the raw downloads
    */
-  constructor(pat, orgUrl) {
+  constructor(pat, orgUrl, { connection, http } = {}) {
     const parsed = DevOpsClient.parseOrgUrl(orgUrl);
     this.orgUrl = parsed.orgUrl;
     this.projectFilter = parsed.project;
     this.pat = pat;
+    this.http = http || axios;
 
-    const handler = azdev.getPersonalAccessTokenHandler(pat);
-    this.conn = new azdev.WebApi(this.orgUrl, handler);
+    if (connection) {
+      this.conn = connection;
+    } else {
+      const handler = azdev.getPersonalAccessTokenHandler(pat);
+      this.conn = new azdev.WebApi(this.orgUrl, handler);
+    }
 
     // Lazy API clients — instantiated on first use.
     this._core = null;
@@ -54,40 +64,10 @@ class DevOpsClient {
 
   /**
    * Parse a user-provided URL into org base URL + optional project.
-   *
-   * Handles:
-   *   https://dev.azure.com/myorg                    → org only
-   *   https://dev.azure.com/myorg/MyProject           → org + project
-   *   https://myorg.visualstudio.com                  → org only
-   *   https://myorg.visualstudio.com/MyProject        → org + project
-   *   https://myorg.visualstudio.com/MyProject/_git/… → org + project (extra path stripped)
+   * The rules (and the fixtures) live in core/org-url.js.
    */
   static parseOrgUrl(raw) {
-    let url = (raw || '').replace(/\/+$/, '');
-
-    try {
-      const u = new URL(url);
-      const parts = u.pathname.split('/').filter(Boolean);
-
-      if (u.hostname === 'dev.azure.com') {
-        const org = parts[0] || '';
-        const project = parts[1] || null;
-        return { orgUrl: `${u.protocol}//${u.hostname}/${org}`, project };
-      }
-
-      if (u.hostname.endsWith('.visualstudio.com')) {
-        const project = parts[0] || null;
-        return { orgUrl: `${u.protocol}//${u.hostname}`, project };
-      }
-
-      // On-prem / unknown — treat first path segment as collection,
-      // second as possible project
-      const project = parts.length >= 2 ? parts[1] : null;
-      const basePath = parts.length >= 1 ? `/${parts[0]}` : '';
-      return { orgUrl: `${u.protocol}//${u.hostname}${basePath}`, project };
-    } catch {
-      return { orgUrl: url, project: null };
-    }
+    return parseOrgUrl(raw);
   }
 
   // ── Authenticated user ───────────────────────────────────────────
@@ -112,7 +92,7 @@ class DevOpsClient {
    */
   async downloadAttachment(url, destPath) {
     const auth = Buffer.from(`:${this.pat}`).toString('base64');
-    const res = await axios.get(url, {
+    const res = await this.http.get(url, {
       responseType: 'arraybuffer',
       maxRedirects: 5,
       timeout: 30000,

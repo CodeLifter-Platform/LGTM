@@ -9,8 +9,7 @@
  *   5. Clean up the temp clone when done
  */
 
-const { spawn, execSync } = require('child_process');
-const { BrowserWindow } = require('electron');
+const { spawn: nodeSpawn, execSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -24,13 +23,26 @@ const {
   applySubstitutions,
   renderImagesSection,
 } = require('./prompt-attachments');
+const { htmlToText } = require('./core/html-text');
+const {
+  formatIdentity,
+  selectReviewThreads,
+  summarizeThreads,
+  renderWorkItemDetails,
+} = require('./core/review-prompt');
 
-function formatIdentity(user) {
-  if (!user) return '';
-  const name = user.displayName || user.email || '';
-  const id = user.id || '';
-  if (name && id) return `${name} (${id})`;
-  return name || id || '';
+const DEFAULT_RESOURCES_DIR = path.join(__dirname, '..', '..', 'resources');
+
+/**
+ * A timer that never keeps the process alive on its own: these are
+ * housekeeping delays (clone cleanup, purging a finished review from the
+ * list, the SIGKILL grace) and must not pin a Node process, or a test run,
+ * open for ten minutes after the work is done.
+ */
+function unrefTimeout(fn, ms) {
+  const t = setTimeout(fn, ms);
+  if (t && typeof t.unref === 'function') t.unref();
+  return t;
 }
 
 /**
@@ -81,12 +93,38 @@ function detectDefaultBranch(clonePath) {
 }
 
 class AgentRunner {
-  constructor(config) {
+  /**
+   * @param {object} config - settings store (get/set)
+   * @param {object} [deps] - every collaborator is injectable so the runner can be
+   *   driven in a plain Node process; main.js passes the Electron notifier.
+   * @param {{ update(key, payload), chunk(key, payload) }} [deps.notify] - renderer sink
+   * @param {AgentRegistry} [deps.registry]
+   * @param {ScenarioPrompts} [deps.scenarioPrompts]
+   * @param {PromptResolver} [deps.promptResolver]
+   * @param {function} [deps.spawn]                       - child_process.spawn
+   * @param {(pat, orgUrl) => RepoCloner} [deps.createCloner]
+   * @param {(pat, orgUrl) => DevOpsClient} [deps.createDevopsClient]
+   * @param {string} [deps.resourcesDir]                  - where LGTM_REVIEW_PROMPT.md lives
+   * @param {number} [deps.cleanupDelayMs]                - wait before removing the clone after exit
+   * @param {number} [deps.retainMs]                      - how long a finished review stays listed
+   * @param {number} [deps.killGraceMs]                   - SIGTERM → SIGKILL grace on cancel
+   * @param {{ firstOutputMs, ongoingSilenceMs }} [deps.watchdog]
+   */
+  constructor(config, deps = {}) {
     this.config = config;
-    this.registry = new AgentRegistry();
-    this.promptResolver = new PromptResolver(config);
-    this.scenarioPrompts = new ScenarioPrompts();
-    this.scenarioPrompts.loadAll(); // fail fast at startup if files missing
+    this.registry = deps.registry || new AgentRegistry();
+    this.promptResolver = deps.promptResolver || new PromptResolver(config);
+    this.scenarioPrompts = deps.scenarioPrompts || new ScenarioPrompts();
+    if (!this.scenarioPrompts.loaded) this.scenarioPrompts.loadAll(); // fail fast at startup if files missing
+    this.notify = deps.notify || require('./renderer-notify').createRendererNotifier();
+    this._spawn = deps.spawn || nodeSpawn;
+    this._createCloner = deps.createCloner || ((pat, orgUrl) => new RepoCloner(pat, orgUrl));
+    this._createDevopsClient = deps.createDevopsClient || ((pat, orgUrl) => new DevOpsClient(pat, orgUrl));
+    this.resourcesDir = deps.resourcesDir || DEFAULT_RESOURCES_DIR;
+    this.cleanupDelayMs = deps.cleanupDelayMs !== undefined ? deps.cleanupDelayMs : 5000;
+    this.retainMs = deps.retainMs !== undefined ? deps.retainMs : 10 * 60 * 1000;
+    this.killGraceMs = deps.killGraceMs !== undefined ? deps.killGraceMs : 2000;
+    this.watchdogTimings = { firstOutputMs: 60000, ongoingSilenceMs: 150000, ...(deps.watchdog || {}) };
     this.cloner = null;       // initialised once we have a PAT
     this.devopsClient = null;  // for fetching existing threads
     this.currentUser = null;   // set after auth — used for REVIEWER_/AUTHOR_IDENTITY
@@ -97,8 +135,8 @@ class AgentRunner {
    * Set/update the PAT and org URL (called after authentication).
    */
   setCredentials(pat, orgUrl) {
-    this.cloner = new RepoCloner(pat, orgUrl);
-    this.devopsClient = new DevOpsClient(pat, orgUrl);
+    this.cloner = this._createCloner(pat, orgUrl);
+    this.devopsClient = this._createDevopsClient(pat, orgUrl);
   }
 
   /**
@@ -151,8 +189,8 @@ class AgentRunner {
    */
   _armSilenceWatchdog(
     key, review, agentId,
-    firstOutputMs = 60000,
-    ongoingSilenceMs = 150000,  // 2.5 min
+    firstOutputMs = this.watchdogTimings.firstOutputMs,
+    ongoingSilenceMs = this.watchdogTimings.ongoingSilenceMs,  // 2.5 min
   ) {
     let firedFirstOutput = false;
     let lastOutputAt = Date.now();
@@ -282,7 +320,7 @@ class AgentRunner {
       // ── Step 2: Build the review prompt ───────────────────────
 
       // Layer A: LGTM universal review prompt (severity system, comment format, re-review rules)
-      const universalPromptPath = path.join(__dirname, '..', '..', 'resources', 'LGTM_REVIEW_PROMPT.md');
+      const universalPromptPath = path.join(this.resourcesDir, 'LGTM_REVIEW_PROMPT.md');
       let universalPrompt = '';
       try {
         universalPrompt = fs.readFileSync(universalPromptPath, 'utf8');
@@ -326,28 +364,14 @@ class AgentRunner {
       let threadCommentHtml = []; // collected separately so we can scan for images
       try {
         const threads = await this.devopsClient.getPrThreads(pr.project, pr.repoId, pr.id);
-        const reviewThreads = threads.filter((t) =>
-          t.comments.length > 0 && t.comments[0].commentType === 1
-        );
+        const reviewThreads = selectReviewThreads(threads);
 
         for (const t of reviewThreads) {
           for (const c of t.comments) threadCommentHtml.push(c.content || '');
         }
 
         if (reviewThreads.length > 0) {
-          const threadLines = reviewThreads.map((t) => {
-            const statusMap = { 1: 'Active', 2: 'Fixed', 3: 'WontFix', 4: 'Closed', 5: 'ByDesign', 6: 'Pending' };
-            const status = statusMap[t.status] || `Unknown(${t.status})`;
-            const firstComment = t.comments[0].content.substring(0, 200);
-            return `- Thread #${t.id} [${status}]: ${firstComment}${t.comments[0].content.length > 200 ? '…' : ''}`;
-          });
-          existingThreadsSummary = [
-            '\n## Existing Review Threads',
-            '',
-            'The following review comments already exist on this PR. Follow the re-review rules strictly:',
-            '',
-            ...threadLines,
-          ].join('\n');
+          existingThreadsSummary = summarizeThreads(reviewThreads);
         }
       } catch (err) {
         console.warn(`[LGTM] Could not fetch existing threads: ${err.message}`);
@@ -388,17 +412,7 @@ class AgentRunner {
         extraSections.push({ title: 'Project-Specific Rules', body: repoPrompt });
       }
       if (prDescription) {
-        const stripped = applySubstitutions(prDescription, prImages.substitutions)
-          .replace(/<br\s*\/?>/gi, '\n')
-          .replace(/<\/p>/gi, '\n\n')
-          .replace(/<[^>]+>/g, '')
-          .replace(/&nbsp;/g, ' ')
-          .replace(/&amp;/g, '&')
-          .replace(/&lt;/g, '<')
-          .replace(/&gt;/g, '>')
-          .replace(/&quot;/g, '"')
-          .replace(/\n{3,}/g, '\n\n')
-          .trim();
+        const stripped = htmlToText(applySubstitutions(prDescription, prImages.substitutions));
         if (stripped) {
           extraSections.push({ title: 'PR Description', body: stripped });
         }
@@ -412,7 +426,7 @@ class AgentRunner {
       if (existingThreadsSummary) {
         extraSections.push({
           title: 'Pre-fetched Existing Review Threads',
-          body: existingThreadsSummary.replace(/^\n## Existing Review Threads\n\n[^\n]*\n\n/, ''),
+          body: existingThreadsSummary,
         });
       } else if (scenarioId === 'resolve-comments') {
         extraSections.push({
@@ -451,7 +465,7 @@ class AgentRunner {
       const promptFile = path.join(os.tmpdir(), `lgtm-prompt-${Date.now()}.txt`);
       fs.writeFileSync(promptFile, prompt, 'utf8');
 
-      const child = spawn(command, args, {
+      const child = this._spawn(command, args, {
         cwd: clonePath,
         stdio: [stdinPrompt ? 'pipe' : 'ignore', 'pipe', 'pipe'],
         shell: false,
@@ -511,11 +525,11 @@ class AgentRunner {
 
         // ── Step 5: Cleanup ────────────────────────────────
         if (review.cleanup) {
-          setTimeout(() => review.cleanup(), 5000); // brief delay so agent can finish writing
+          unrefTimeout(() => review.cleanup(), this.cleanupDelayMs); // brief delay so agent can finish writing
         }
 
         // Keep in map for UI display, then purge
-        setTimeout(() => this.activeReviews.delete(key), 10 * 60 * 1000);
+        unrefTimeout(() => this.activeReviews.delete(key), this.retainMs);
       });
 
       child.on('error', (err) => {
@@ -714,7 +728,7 @@ class AgentRunner {
       const promptFile = path.join(os.tmpdir(), `lgtm-wi-prompt-${Date.now()}.txt`);
       fs.writeFileSync(promptFile, prompt, 'utf8');
 
-      const child = spawn(command, args, {
+      const child = this._spawn(command, args, {
         cwd: clonePath,
         stdio: [stdinPrompt ? 'pipe' : 'ignore', 'pipe', 'pipe'],
         shell: false,
@@ -768,9 +782,9 @@ class AgentRunner {
         console.log(`[LGTM] Work item action ${key} finished with code ${code}${review.cancelled ? ' (cancelled)' : ''}`);
 
         if (review.cleanup) {
-          setTimeout(() => review.cleanup(), 5000);
+          unrefTimeout(() => review.cleanup(), this.cleanupDelayMs);
         }
-        setTimeout(() => this.activeReviews.delete(key), 10 * 60 * 1000);
+        unrefTimeout(() => this.activeReviews.delete(key), this.retainMs);
       });
 
       child.on('error', (err) => {
@@ -860,44 +874,7 @@ class AgentRunner {
   }
 
   _renderWorkItemDetails(details, repoInfo, imageSubs = null) {
-    const subbed = (html) => (imageSubs ? applySubstitutions(html || '', imageSubs) : (html || ''));
-    const stripHtml = (html) => subbed(html)
-      .replace(/<br\s*\/?>/gi, '\n')
-      .replace(/<\/p>/gi, '\n\n')
-      .replace(/<[^>]+>/g, '')
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-
-    const parts = [
-      `Project: ${details.project || repoInfo.project}`,
-      `Repo: ${repoInfo.repo}`,
-      `ID: ${details.id}`,
-      `Type: ${details.type || ''}`,
-      `Title: ${details.title || ''}`,
-      `State: ${details.state || ''}`,
-    ];
-    if (details.priority != null) parts.push(`Priority: ${details.priority}`);
-    if (details.severity) parts.push(`Severity: ${details.severity}`);
-    if (details.tags) parts.push(`Tags: ${details.tags}`);
-
-    const desc = stripHtml(details.description);
-    if (desc) parts.push('', '### Description', desc);
-
-    const repro = stripHtml(details.reproSteps);
-    if (repro) parts.push('', '### Repro Steps', repro);
-
-    const sysInfo = stripHtml(details.systemInfo);
-    if (sysInfo) parts.push('', '### System Info', sysInfo);
-
-    const ac = stripHtml(details.acceptanceCriteria);
-    if (ac) parts.push('', '### Acceptance Criteria', ac);
-
-    return parts.join('\n');
+    return renderWorkItemDetails(details, repoInfo, imageSubs);
   }
 
   /**
@@ -919,11 +896,11 @@ class AgentRunner {
     const child = review.child;
     if (child && child.exitCode === null && !child.killed) {
       try { child.kill('SIGTERM'); } catch { /* ignore */ }
-      setTimeout(() => {
-        if (child.exitCode === null && !child.killed) {
+      unrefTimeout(() => {
+        if (child.exitCode === null) {
           try { child.kill('SIGKILL'); } catch { /* ignore */ }
         }
-      }, 2000);
+      }, this.killGraceMs);
     }
 
     // Kill the in-flight git clone if we're still cloning. The cloner sets
@@ -933,11 +910,11 @@ class AgentRunner {
     const cloneChild = review.cloneChild;
     if (cloneChild && cloneChild.exitCode === null && !cloneChild.killed) {
       try { cloneChild.kill('SIGTERM'); } catch { /* ignore */ }
-      setTimeout(() => {
-        if (cloneChild.exitCode === null && !cloneChild.killed) {
+      unrefTimeout(() => {
+        if (cloneChild.exitCode === null) {
           try { cloneChild.kill('SIGKILL'); } catch { /* ignore */ }
         }
-      }, 2000);
+      }, this.killGraceMs);
     }
 
     if (review.status === 'cloning') {
@@ -1042,43 +1019,33 @@ class AgentRunner {
   }
 
   /**
-   * Push a status update to the renderer.
+   * Push a status update to the renderer (through the injected sink).
    */
   _notifyRenderer(key, review) {
-    const windows = BrowserWindow.getAllWindows();
-    if (windows.length > 0) {
-      windows[0].webContents.send('review-update', {
-        key,
-        status: review.status,
-        agentId: review.agentId,
-        mode: review.mode || null,
-        pr: review.pr,
-        promptSource: review.promptSource || null,
-        scenarioId: review.scenarioId || null,
-        report: review.report || null,
-        reportStatus: review.reportStatus || null,
-        reportError: review.reportError || null,
-        timeline: review.timeline || [],
-        clonePath: review.clonePath || null,
-        startedAt: review.startedAt,
-        finishedAt: review.finishedAt || null,
-      });
-    }
+    this.notify.update(key, {
+      key,
+      status: review.status,
+      agentId: review.agentId,
+      mode: review.mode || null,
+      pr: review.pr,
+      promptSource: review.promptSource || null,
+      scenarioId: review.scenarioId || null,
+      report: review.report || null,
+      reportStatus: review.reportStatus || null,
+      reportError: review.reportError || null,
+      timeline: review.timeline || [],
+      clonePath: review.clonePath || null,
+      startedAt: review.startedAt,
+      finishedAt: review.finishedAt || null,
+    });
   }
 
   /**
    * Push a streaming output chunk to the renderer.
    */
   _notifyRendererChunk(key, chunk, review) {
-    const windows = BrowserWindow.getAllWindows();
-    if (windows.length > 0) {
-      windows[0].webContents.send('review-output', {
-        key,
-        chunk,
-        status: review.status,
-      });
-    }
+    this.notify.chunk(key, { key, chunk, status: review.status });
   }
 }
 
-module.exports = { AgentRunner };
+module.exports = { AgentRunner, buildSpawnEnv, detectDefaultBranch };

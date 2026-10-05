@@ -71,6 +71,39 @@ function extractFencedPreamble(fileContent, heading) {
   return body.join('\n').trim();
 }
 
+/**
+ * Every balanced `{...}` run in `text`, outermost only, string-aware
+ * enough for JSON (braces inside quoted strings are skipped).
+ */
+function extractBraceBlocks(text) {
+  const blocks = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"' && depth > 0) { inString = true; continue; }
+    if (ch === '{') {
+      if (depth === 0) start = i;
+      depth += 1;
+    } else if (ch === '}' && depth > 0) {
+      depth -= 1;
+      if (depth === 0) {
+        blocks.push(text.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+  return blocks;
+}
+
 class ScenarioPrompts {
   constructor() {
     this.promptsDir = resolvePromptsDir();
@@ -225,12 +258,12 @@ class ScenarioPrompts {
       candidates.push(match[1]);
     }
 
-    // 2. Fallback: if no fences, scan for top-level `{...}` objects.
+    // 2. Fallback: if no fences, scan for balanced top-level `{...}`
+    //    objects. (A greedy `\{[\s\S]*\}` used to swallow everything from
+    //    the first brace to the last, so two objects on one line became
+    //    one unparsable blob and a valid report was marked unparseable.)
     if (candidates.length === 0) {
-      const braceRe = /\{[\s\S]*\}/g;
-      while ((match = braceRe.exec(output)) !== null) {
-        candidates.push(match[0]);
-      }
+      candidates.push(...extractBraceBlocks(output));
     }
 
     const def = SCENARIOS[scenarioId];
@@ -258,4 +291,4 @@ class ScenarioPrompts {
   }
 }
 
-module.exports = { ScenarioPrompts, AGENT_PREAMBLE_HEADINGS };
+module.exports = { ScenarioPrompts, AGENT_PREAMBLE_HEADINGS, extractBraceBlocks };

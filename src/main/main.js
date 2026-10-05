@@ -3,70 +3,59 @@ const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const axios = require('axios');
 const { autoUpdater } = require('electron-updater');
+const ElectronStore = require('electron-store');
 const { PatStore } = require('./pat-store');
 const { DevOpsClient } = require('./devops-client');
+const { DevOpsSession } = require('./devops-session');
 const { AgentRunner } = require('./agent-runner');
-const { AgentRegistry } = require('./agent-registry');
+const { AgentRegistry, initPath: initAgentPath } = require('./agent-registry');
 const { PromptResolver } = require('./prompt-resolver');
-const { WebhookServer } = require('./webhook-server');
-const ElectronStore = require('electron-store');
+const { createRendererNotifier } = require('./renderer-notify');
+const { quickValidatePat } = require('./quick-validate-pat');
+const { createSettingsStore, readSettings, writeSettings } = require('./settings');
+const { applyPrFilter } = require('./core/pr-filter');
+const { applySessionFlags } = require('./core/session-flags');
+const { serializeAgents } = require('./core/serialize-agents');
+const { buildPrDetailPrompt, buildWorkItemDetailPrompt } = require('./core/detail-prompts');
+const { validatePat } = require('./core/validate-pat');
 
 // ── Globals ──────────────────────────────────────────────────────────
 let tray = null;
 let mainWindow = null;
 let patStore = null;
-let devopsClient = null;
 let agentRunner = null;
 let agentRegistry = null;
-let webhookServer = null;
 let currentPat = null;
-let currentUser = null;
 // Flipped to true if a stored PAT was rejected by the org at startup.
 // Tied to !currentPat in get-pat-status so it auto-clears the moment
 // the user enters a fresh valid PAT.
 let patRejectedAtStartup = false;
+// Set when the OS keychain refused to store (or hand back) the PAT, so the
+// renderer can tell the user the PAT lives in memory only for this session.
+let patStorageWarning = null;
 
-const config = new ElectronStore({
-  defaults: {
-    orgUrl: '',
-    webhookPort: 3847,
-    promptPath: '',           // global fallback prompt path
-    pollingIntervalMs: 60000,
-    defaultAgent: 'claude',
-    agentModels: {},          // { agentId: selectedModelId }
-    repoConfigs: {},          // { "project/repo": { mode, repoFile, customPath } }
-    starredRepos: [],         // ["project/repo", ...] — starred repos are reviewed first
-    maxPrAgeDays: 7,          // only auto-review PRs created within this many days
-    lastUsedRepos: {},        // { [project]: "repoName" } — default for work item repo picker
-    bugsAgent: '',            // agent ID for bug runs (empty = fall back to defaultAgent)
-    bugsAgentModels: {},      // { [agentId]: modelId } for bug runs
-    bugsRepoConfigs: {},      // { "project/repo": "relative/path/to/prompt.md" }
-    ticketsAgent: '',         // agent ID for ticket runs
-    ticketsAgentModels: {},
-    ticketsRepoConfigs: {},
-    // Filter state for the Bugs / Tickets tabs. scope: 'mine' | 'all'.
-    // prFilter: 'all' | 'has' | 'none' — restricts to items with /
-    // without a linked PR. Defaults match what the user asked for:
-    // assigned-to-me, items without a PR (the "do something next" pile).
-    bugsFilters: { scope: 'mine', prFilter: 'none' },
-    ticketsFilters: { scope: 'mine', prFilter: 'none' },
+// Settings live in config.json under userData. Every key, its default and
+// the corrupt-file guard are in ./settings.js; this file only wires the
+// Electron-aware store class in.
+const config = createSettingsStore(ElectronStore);
+
+// Everything that exists only while a PAT is accepted (DevOps client, PR
+// poller, webhook server). validate-pat connects it, clear-pat disconnects
+// it; a second connect replaces the first instead of stacking.
+const session = new DevOpsSession({
+  onUser: (user) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('current-user', user);
+    if (agentRunner) agentRunner.setIdentity(user);
   },
+  onPrList: (prs) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('pr-list', prs);
+  },
+  onPrError: (message) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('pr-error', message);
+  },
+  onWebhookEvent: (event) => handleWebhookEvent(event),
 });
-
-/**
- * Drop work items that don't match the requested PR-linkage filter.
- * 'all' → no-op, 'has' → only items with a linked PR, 'none' → only
- * items without one. Items carry the `hasLinkedPR` flag from
- * DevOpsClient (populated via $expand=Relations).
- */
-function applyPrFilter(items, prFilter) {
-  if (!Array.isArray(items)) return [];
-  if (prFilter === 'has')  return items.filter((it) => it.hasLinkedPR);
-  if (prFilter === 'none') return items.filter((it) => !it.hasLinkedPR);
-  return items;
-}
 
 // ── Auto-updater ────────────────────────────────────────────────────
 autoUpdater.autoDownload = false;       // Don't download until user says so
@@ -164,61 +153,21 @@ app.on('second-instance', () => {
   mainWindow.focus();
 });
 
-/**
- * Cheapest authenticated round-trip against Azure DevOps. Hits
- * `_apis/ConnectionData?connectOptions=none` — the SDK uses this
- * under the hood for `getMe()` but going via axios skips the SDK
- * client warmup and gives us a tight timeout we control.
- *
- * Returns:
- *   { ok: true }                       — PAT works
- *   { ok: false, reason: 'rejected' }  — org responded but auth failed
- *   { ok: false, reason: 'unreachable' } — DNS / timeout / network
- *
- * The reason matters: a rejected PAT forces re-entry, but a network
- * blip should let the user into the app with whatever's cached.
- */
-async function quickValidatePat(pat, orgUrl) {
-  const parsed = DevOpsClient.parseOrgUrl(orgUrl);
-  if (!parsed.orgUrl) return { ok: false, reason: 'rejected' };
-  const auth = Buffer.from(`:${pat}`).toString('base64');
-  const url = `${parsed.orgUrl}/_apis/ConnectionData?connectOptions=none&api-version=7.0`;
-  try {
-    const res = await axios.get(url, {
-      timeout: 4000,
-      headers: { Authorization: `Basic ${auth}`, Accept: 'application/json' },
-      validateStatus: () => true,            // we want to inspect the code ourselves
-      maxRedirects: 0,                       // ADO redirects unauth'd traffic to the sign-in page
-    });
-    const user = res.data && res.data.authenticatedUser;
-    // ADO's "your PAT is bad" signal is a 203 with HTML, not a 401 —
-    // hence the explicit user.id check.
-    if (res.status === 200 && user && user.id) {
-      return { ok: true };
-    }
-    if (res.status === 401 || res.status === 403 || res.status === 203) {
-      return { ok: false, reason: 'rejected' };
-    }
-    return { ok: false, reason: 'unreachable' };
-  } catch (err) {
-    const code = err && err.code;
-    if (code === 'ENOTFOUND' || code === 'ECONNREFUSED' || code === 'ETIMEDOUT'
-        || code === 'ECONNABORTED' || code === 'EAI_AGAIN' || code === 'ENETUNREACH') {
-      return { ok: false, reason: 'unreachable' };
-    }
-    // Unknown failure mode — be conservative and don't lock the user out.
-    console.warn('[LGTM] quickValidatePat error (treating as unreachable):', err.message);
-    return { ok: false, reason: 'unreachable' };
-  }
-}
-
 // ── App lifecycle ────────────────────────────────────────────────────
 app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.dock.hide();
 
+  // Rebuild PATH from the user's login shell before any CLI lookup. This
+  // used to run at import time of agent-registry.js, which spawned a shell
+  // for every module that required it (tests included).
+  initAgentPath();
+
   patStore = new PatStore();
   agentRegistry = new AgentRegistry();
-  agentRunner = new AgentRunner(config);
+  agentRunner = new AgentRunner(config, {
+    registry: agentRegistry,
+    notify: createRendererNotifier(),
+  });
 
   // Load the saved PAT and wire up clients BEFORE creating the
   // window. The renderer pulls PAT status via `get-pat-status` on
@@ -231,7 +180,9 @@ app.whenReady().then(async () => {
   // sees hasPat=false and lands on the setup form. We deliberately
   // await the validation so the answer to get-pat-status is final
   // by the time the renderer asks.
-  const existingPat = await patStore.get();
+  const stored = await patStore.get();
+  const existingPat = stored.pat;
+  if (stored.error) patStorageWarning = stored.error;
   const orgUrl = config.get('orgUrl');
   if (existingPat && orgUrl) {
     const t0 = Date.now();
@@ -297,6 +248,7 @@ ipcMain.handle('get-pat-status', () => ({
   hasPat: !!currentPat,
   orgUrl: config.get('orgUrl') || '',
   patExpired: patRejectedAtStartup && !currentPat,
+  storageWarning: patStorageWarning,
 }));
 
 app.on('window-all-closed', (e) => e.preventDefault());
@@ -392,36 +344,18 @@ function showSettings() {
 
 // ── DevOps initialisation ────────────────────────────────────────────
 async function initDevOps(pat, orgUrl) {
-  devopsClient = new DevOpsClient(pat, orgUrl);
-
-  // Identify the authenticated user so the UI can flag "my PRs".
-  try {
-    currentUser = await devopsClient.getMe();
-    console.log(`[LGTM] Authenticated as: ${currentUser.displayName || currentUser.email || currentUser.id}`);
-    if (mainWindow) mainWindow.webContents.send('current-user', currentUser);
-    if (agentRunner) agentRunner.setIdentity(currentUser);
-  } catch (err) {
-    console.warn('[LGTM] Could not resolve current user:', err.message);
-    currentUser = null;
-    if (agentRunner) agentRunner.setIdentity(null);
-  }
-
-  pollPrs();
-  setInterval(pollPrs, config.get('pollingIntervalMs'));
-
-  webhookServer = new WebhookServer(config.get('webhookPort'), (event) => {
-    handleWebhookEvent(event);
+  await session.connect({
+    pat,
+    orgUrl,
+    pollingIntervalMs: config.get('pollingIntervalMs'),
+    webhookPort: config.get('webhookPort'),
+    webhookHost: config.get('webhookHost'),
+    webhookSecret: config.get('webhookSecret'),
   });
-  webhookServer.start();
 }
 
-async function pollPrs() {
-  try {
-    const prs = await devopsClient.getAllOpenPRs();
-    mainWindow.webContents.send('pr-list', prs);
-  } catch (err) {
-    mainWindow.webContents.send('pr-error', err.message);
-  }
+function pollPrs() {
+  return session.pollNow();
 }
 
 function handleWebhookEvent(event) {
@@ -432,88 +366,63 @@ function handleWebhookEvent(event) {
 
 // ── IPC: Authentication ──────────────────────────────────────────────
 
-/**
- * Race a promise against a timeout. Used to guarantee the PAT-validation
- * IPC always returns to the renderer in bounded time, even if the
- * underlying SDK call hangs (DevOps slow path, DNS issue, keychain
- * prompt firing invisibly behind LGTM).
- */
-function withTimeout(promise, ms, label) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(
-      () => reject(new Error(`${label} timed out after ${ms}ms`)),
-      ms,
-    )),
-  ]);
-}
-
 ipcMain.handle('validate-pat', async (_event, { pat, orgUrl }) => {
-  try {
-    const client = new DevOpsClient(pat, orgUrl);
-    const parsed = DevOpsClient.parseOrgUrl(orgUrl);
-    console.log(`[LGTM] Connecting to org: ${parsed.orgUrl}${parsed.project ? ` (project filter: ${parsed.project})` : ''}`);
+  const parsed = DevOpsClient.parseOrgUrl(orgUrl);
+  console.log(`[LGTM] Connecting to org: ${parsed.orgUrl}${parsed.project ? ` (project filter: ${parsed.project})` : ''}`);
 
-    // The ONLY thing we await is the call that proves the PAT actually
-    // works against this org. Everything else (keychain persistence,
-    // getMe(), webhook server, PR poll) runs in the background after
-    // we return — the renderer hooks events for whatever it needs.
-    const projects = await withTimeout(client.getProjects(), 20000, 'getProjects');
-    if (!projects || projects.length === 0) {
-      return { success: false, error: 'PAT valid but no projects found.' };
-    }
+  // The one network call we await is the one that proves the PAT works
+  // against this org; every failure mode is mapped to a message in
+  // core/validate-pat.js. getMe(), the webhook server and the PR poll run
+  // in the background after we return.
+  const result = await validatePat({
+    pat,
+    orgUrl,
+    createClient: (p, u) => new DevOpsClient(p, u),
+  });
+  if (!result.success) return result;
 
-    // In-memory state is set synchronously so subsequent IPC calls
-    // (loadAgents, getSettings, refresh-prs) work immediately.
-    config.set('orgUrl', orgUrl);
-    currentPat = pat;
-    agentRunner.setCredentials(pat, parsed.orgUrl);
+  // In-memory state is set synchronously so subsequent IPC calls
+  // (loadAgents, getSettings, refresh-prs) work immediately.
+  config.set('orgUrl', orgUrl);
+  currentPat = pat;
+  patRejectedAtStartup = false;
+  agentRunner.setCredentials(pat, parsed.orgUrl);
 
-    // Persist the PAT and finish wiring up DevOps in the background.
-    // electron-store writes to disk synchronously, so even if keytar
-    // hangs on a hidden keychain prompt the fallback store still has
-    // the PAT for next launch.
-    patStore.set(pat).catch((err) => {
-      console.warn('[LGTM] PAT persistence failed (in-memory still works):', err.message);
-    });
-    initDevOps(pat, orgUrl).catch((err) => {
-      console.warn('[LGTM] initDevOps error (background):', err.message);
-    });
+  // Persist the PAT to the OS keychain. The write is capped at a few
+  // seconds, and its outcome is reported, not assumed: a refusing keychain
+  // means the PAT is in memory for this session only, and the renderer
+  // says so.
+  const storage = await patStore.set(pat);
+  patStorageWarning = storage.ok ? null : storage.error;
+  if (!storage.ok) console.warn(`[LGTM] PAT not persisted: ${storage.error}`);
 
-    return {
-      success: true,
-      projects: projects.map((p) => p.name),
-      filterNote: parsed.project ? ` Filtered to project "${parsed.project}".` : '',
-    };
-  } catch (err) {
-    const status = err.response?.status;
-    const parsed = DevOpsClient.parseOrgUrl(orgUrl);
-    let msg = err.message;
-    if (status === 404) msg = `404 Not Found — API call to ${parsed.orgUrl}/_apis/projects failed. Check your org URL.`;
-    else if (status === 401 || status === 403) msg = `${status} — PAT was rejected. Make sure it hasn't expired and has Code (Read) scope.`;
-    return { success: false, error: msg };
-  }
+  initDevOps(pat, orgUrl).catch((err) => {
+    console.warn('[LGTM] initDevOps error (background):', err.message);
+  });
+
+  return { ...result, storage };
 });
 
 ipcMain.handle('clear-pat', async () => {
-  await patStore.delete();
+  await session.disconnect();
+  const removed = await patStore.delete();
   config.set('orgUrl', '');
   currentPat = null;
-  currentUser = null;
-  devopsClient = null;
   patRejectedAtStartup = false;
-  if (webhookServer) webhookServer.stop();
-  return { success: true };
+  patStorageWarning = null;
+  if (agentRunner) agentRunner.setIdentity(null);
+  if (!removed.ok) console.warn(`[LGTM] clear-pat: ${removed.error}`);
+  return { success: true, warning: removed.ok ? null : removed.error };
 });
 
-ipcMain.handle('get-me', () => currentUser);
+ipcMain.handle('get-me', () => session.user);
 
 // ── IPC: PRs ─────────────────────────────────────────────────────────
 
 ipcMain.handle('refresh-prs', async () => {
-  if (!devopsClient) return { success: false, error: 'Not authenticated' };
+  if (!session.client) return { success: false, error: 'Not authenticated' };
   try {
-    const prs = await devopsClient.getAllOpenPRs();
+    const prs = await session.client.getAllOpenPRs();
     return { success: true, prs };
   } catch (err) {
     return { success: false, error: err.message };
@@ -523,10 +432,10 @@ ipcMain.handle('refresh-prs', async () => {
 // ── IPC: Bugs ────────────────────────────────────────────────────────
 
 ipcMain.handle('refresh-bugs', async (_event, params = {}) => {
-  if (!devopsClient) return { success: false, error: 'Not authenticated' };
+  if (!session.client) return { success: false, error: 'Not authenticated' };
   const { scope = 'mine', prFilter = 'none' } = params || {};
   try {
-    const bugs = await devopsClient.getOpenBugs({ assignedToMeOnly: scope !== 'all' });
+    const bugs = await session.client.getOpenBugs({ assignedToMeOnly: scope !== 'all' });
     return { success: true, bugs: applyPrFilter(bugs, prFilter) };
   } catch (err) {
     return { success: false, error: err.message };
@@ -534,10 +443,10 @@ ipcMain.handle('refresh-bugs', async (_event, params = {}) => {
 });
 
 ipcMain.handle('refresh-workitems', async (_event, params = {}) => {
-  if (!devopsClient) return { success: false, error: 'Not authenticated' };
+  if (!session.client) return { success: false, error: 'Not authenticated' };
   const { scope = 'mine', prFilter = 'none' } = params || {};
   try {
-    const items = await devopsClient.getOpenWorkItems({ assignedToMeOnly: scope !== 'all' });
+    const items = await session.client.getOpenWorkItems({ assignedToMeOnly: scope !== 'all' });
     return { success: true, items: applyPrFilter(items, prFilter) };
   } catch (err) {
     return { success: false, error: err.message };
@@ -563,9 +472,9 @@ ipcMain.handle('start-workitem-action', async (_event, { workItem, repoInfo, age
 });
 
 ipcMain.handle('get-repos-for-project', async (_event, project) => {
-  if (!devopsClient) return { success: false, error: 'Not authenticated', repos: [] };
+  if (!session.client) return { success: false, error: 'Not authenticated', repos: [] };
   try {
-    const repos = await devopsClient.getRepos(project);
+    const repos = await session.client.getRepos(project);
     return {
       success: true,
       repos: (repos || []).map((r) => ({ id: r.id, name: r.name })),
@@ -619,21 +528,6 @@ ipcMain.handle('save-log-file', async (_event, { key, suggestedName }) => {
 });
 
 // ── IPC: Agents ──────────────────────────────────────────────────────
-
-// Strip non-serializable members (functions) before crossing the IPC
-// boundary. Electron's structured-clone serialization throws on any
-// function value, which silently rejects the renderer's promise and
-// leaves dropdowns/settings stuck. Drop everything that's a function
-// so adding new ones (next agent driver, etc.) doesn't relapse this.
-function serializeAgents(agentList) {
-  return agentList.map((agent) => {
-    const out = {};
-    for (const [k, v] of Object.entries(agent)) {
-      if (typeof v !== 'function') out[k] = v;
-    }
-    return out;
-  });
-}
 
 ipcMain.handle('get-agents', () => serializeAgents(agentRegistry.getAll()));
 
@@ -704,30 +598,6 @@ function resetTestSession(agentId) {
   testAgentInUse = agentId;
 }
 
-/**
- * Inject the agent-specific session-continuity flags on top of the
- * args buildCommand handed back. Mutates a fresh array; doesn't touch
- * the registry's defaults.
- *
- * Claude split: `--session-id <uuid>` CREATES a session with that ID
- * and refuses if one already exists ("session ID is already in use").
- * To continue, use `--resume <uuid>`. So turn 1 creates, turns 2+
- * resume.
- */
-function applySessionFlags(agentId, args) {
-  const out = [...args];
-  if (agentId === 'claude' && testSessionId) {
-    if (testFirstTurn) {
-      out.push('--session-id', testSessionId);
-    } else {
-      out.push('--resume', testSessionId);
-    }
-  } else if (agentId === 'augment' && !testFirstTurn) {
-    out.push('--continue');
-  }
-  return out;
-}
-
 ipcMain.handle('agent-test-version', async (_event, { agentId }) => {
   const agent = agentRegistry.get(agentId);
   if (!agent) return { success: false, error: `Unknown agent: ${agentId}` };
@@ -787,7 +657,7 @@ ipcMain.handle('agent-test-send', async (event, { agentId, model, message }) => 
 
   // Layer on session-continuity flags so the agent remembers prior turns
   // in this chat. Claude pins a UUID; auggie uses --continue from turn 2 on.
-  const finalArgs = applySessionFlags(agentId, args);
+  const finalArgs = applySessionFlags(agentId, args, { sessionId: testSessionId, firstTurn: testFirstTurn });
 
   const child = spawn(command, finalArgs, {
     cwd: testCwd,
@@ -900,85 +770,6 @@ function loadRepoPromptIfAny(pr, clonePath) {
   return '';
 }
 
-function buildWorkItemDetailPrompt({ workItem, details, repoInfo, repoPrompt }) {
-  const stripHtml = (html) => (html || '')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>/gi, '\n\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-
-  const lines = [];
-  if (repoPrompt && repoPrompt.trim()) {
-    lines.push('# Repo-specific Rules', '', repoPrompt.trim(), '');
-  }
-  lines.push(`# ${details.type || workItem.type || 'Work Item'} #${details.id || workItem.id}`, '');
-  lines.push(`- Project: ${details.project || workItem.project}`);
-  lines.push(`- Repo: ${repoInfo.repo}`);
-  lines.push(`- Title: ${details.title || workItem.title || ''}`);
-  lines.push(`- State: ${details.state || ''}`);
-  if (details.priority != null) lines.push(`- Priority: ${details.priority}`);
-  if (details.severity) lines.push(`- Severity: ${details.severity}`);
-  if (details.tags) lines.push(`- Tags: ${details.tags}`);
-  if (workItem.webUrl) lines.push(`- URL: ${workItem.webUrl}`);
-
-  const desc = stripHtml(details.description);
-  if (desc) lines.push('', '## Description', '', desc);
-  const repro = stripHtml(details.reproSteps);
-  if (repro) lines.push('', '## Repro Steps', '', repro);
-  const sys = stripHtml(details.systemInfo);
-  if (sys) lines.push('', '## System Info', '', sys);
-  const ac = stripHtml(details.acceptanceCriteria);
-  if (ac) lines.push('', '## Acceptance Criteria', '', ac);
-
-  lines.push('', '# Task', '');
-  lines.push(
-    `Investigate this work item against the cloned repo. Read the relevant code, ` +
-    `propose a fix or implementation plan, and discuss with the user before making changes. ` +
-    `The user may follow up with questions — answer them based on the repo and work-item context.`,
-  );
-  return lines.join('\n');
-}
-
-function buildPrDetailPrompt({ pr, prDescription, universalPrompt, repoPrompt }) {
-  const sourceBranch = (pr.sourceBranch || '').replace(/^refs\/heads\//, '');
-  const targetBranch = (pr.targetBranch || '').replace(/^refs\/heads\//, '');
-  const lines = [];
-  if (universalPrompt.trim()) {
-    lines.push('# LGTM Review Rules', '', universalPrompt.trim(), '');
-  }
-  if (repoPrompt.trim()) {
-    lines.push('# Repo-specific Rules', '', repoPrompt.trim(), '');
-  }
-  lines.push('# Pull Request', '');
-  lines.push(`- Project: ${pr.project}`);
-  lines.push(`- Repo: ${pr.repo}`);
-  lines.push(`- PR ID: !${pr.id}`);
-  lines.push(`- Title: ${pr.title || ''}`);
-  lines.push(`- Author: ${pr.createdBy || ''}`);
-  lines.push(`- Source branch: ${sourceBranch}`);
-  lines.push(`- Target branch: ${targetBranch}`);
-  if (pr.webUrl) lines.push(`- URL: ${pr.webUrl}`);
-  if (prDescription && prDescription.trim()) {
-    lines.push('', '## Description', '', prDescription.trim());
-  }
-  lines.push('');
-  lines.push('# Task');
-  lines.push('');
-  lines.push(
-    `You are reviewing this PR interactively. Start by reading the diff between ` +
-    `\`${targetBranch}\` and \`${sourceBranch}\` (use \`git diff ${targetBranch}...${sourceBranch}\` ` +
-    `or read changed files directly). Apply the rules above, then summarize what you find. ` +
-    `The user may follow up with questions — answer them based on the repo and PR context.`,
-  );
-  return lines.join('\n');
-}
-
 ipcMain.handle('agent-detail-prepare', async (_event, { target, agentId, model }) => {
   if (!agentRunner || !agentRunner.cloner) {
     return { success: false, error: 'Not authenticated yet — set up your PAT first.' };
@@ -1080,12 +871,7 @@ ipcMain.handle('agent-detail-send', async (event, { message }) => {
   // Layer on session-continuity flags. First turn for claude creates
   // the session via --session-id; later turns resume. Auggie uses
   // --continue from turn 2 onwards in the same cwd.
-  const finalArgs = [...args];
-  if (agentId === 'claude' && detailRun.sessionId) {
-    finalArgs.push(detailRun.firstTurn ? '--session-id' : '--resume', detailRun.sessionId);
-  } else if (agentId === 'augment' && !detailRun.firstTurn) {
-    finalArgs.push('--continue');
-  }
+  const finalArgs = applySessionFlags(agentId, args, { sessionId: detailRun.sessionId, firstTurn: detailRun.firstTurn });
 
   const child = spawn(command, finalArgs, {
     cwd: clonePath,
@@ -1140,45 +926,10 @@ ipcMain.handle('agent-detail-cleanup', async () => {
 
 // ── IPC: Settings ────────────────────────────────────────────────────
 
-ipcMain.handle('get-settings', () => ({
-  orgUrl: config.get('orgUrl'),
-  webhookPort: config.get('webhookPort'),
-  promptPath: config.get('promptPath'),
-  pollingIntervalMs: config.get('pollingIntervalMs'),
-  defaultAgent: config.get('defaultAgent'),
-  agentModels: config.get('agentModels'),
-  repoConfigs: config.get('repoConfigs'),
-  starredRepos: config.get('starredRepos'),
-  maxPrAgeDays: config.get('maxPrAgeDays'),
-  lastUsedRepos: config.get('lastUsedRepos'),
-  bugsAgent: config.get('bugsAgent'),
-  bugsAgentModels: config.get('bugsAgentModels'),
-  bugsRepoConfigs: config.get('bugsRepoConfigs'),
-  ticketsAgent: config.get('ticketsAgent'),
-  ticketsAgentModels: config.get('ticketsAgentModels'),
-  ticketsRepoConfigs: config.get('ticketsRepoConfigs'),
-  bugsFilters: config.get('bugsFilters'),
-  ticketsFilters: config.get('ticketsFilters'),
-}));
+ipcMain.handle('get-settings', () => readSettings(config));
 
 ipcMain.handle('save-settings', async (_event, settings) => {
-  if (settings.promptPath !== undefined) config.set('promptPath', settings.promptPath);
-  if (settings.webhookPort !== undefined) config.set('webhookPort', settings.webhookPort);
-  if (settings.pollingIntervalMs !== undefined) config.set('pollingIntervalMs', settings.pollingIntervalMs);
-  if (settings.defaultAgent !== undefined) config.set('defaultAgent', settings.defaultAgent);
-  if (settings.agentModels !== undefined) config.set('agentModels', settings.agentModels);
-  if (settings.repoConfigs !== undefined) config.set('repoConfigs', settings.repoConfigs);
-  if (settings.starredRepos !== undefined) config.set('starredRepos', settings.starredRepos);
-  if (settings.maxPrAgeDays !== undefined) config.set('maxPrAgeDays', settings.maxPrAgeDays);
-  if (settings.lastUsedRepos !== undefined) config.set('lastUsedRepos', settings.lastUsedRepos);
-  if (settings.bugsAgent !== undefined) config.set('bugsAgent', settings.bugsAgent);
-  if (settings.bugsAgentModels !== undefined) config.set('bugsAgentModels', settings.bugsAgentModels);
-  if (settings.bugsRepoConfigs !== undefined) config.set('bugsRepoConfigs', settings.bugsRepoConfigs);
-  if (settings.ticketsAgent !== undefined) config.set('ticketsAgent', settings.ticketsAgent);
-  if (settings.ticketsAgentModels !== undefined) config.set('ticketsAgentModels', settings.ticketsAgentModels);
-  if (settings.ticketsRepoConfigs !== undefined) config.set('ticketsRepoConfigs', settings.ticketsRepoConfigs);
-  if (settings.bugsFilters !== undefined) config.set('bugsFilters', settings.bugsFilters);
-  if (settings.ticketsFilters !== undefined) config.set('ticketsFilters', settings.ticketsFilters);
+  writeSettings(config, settings);
   return { success: true };
 });
 
@@ -1191,9 +942,9 @@ ipcMain.handle('get-prompt-conventions', () => {
 // ── IPC: Repo file tree (for autocomplete) ──────────────────────────
 
 ipcMain.handle('get-repo-file-tree', async (_event, { project, repoName }) => {
-  if (!devopsClient) return { success: false, error: 'Not authenticated', files: [] };
+  if (!session.client) return { success: false, error: 'Not authenticated', files: [] };
   try {
-    const files = await devopsClient.getRepoFileTree(project, repoName);
+    const files = await session.client.getRepoFileTree(project, repoName);
     return { success: true, files };
   } catch (err) {
     console.error(`[LGTM] Failed to fetch file tree for ${project}/${repoName}:`, err.message);

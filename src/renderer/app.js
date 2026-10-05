@@ -2,6 +2,13 @@
  * LGTM — Renderer process (UI logic)
  */
 
+// Pure decisions live in logic.js (loaded before this file; tested under tests/renderer).
+const {
+  isTerminalStatus, escHtml, renderMarkdownToHtml,
+  resolvePrMode, cyclePrMode, actionModeFor,
+  prAgeDays, sortRepoKeys, buildAutoReviewQueue,
+} = window.LgtmLogic;
+
 // ── DOM refs ─────────────────────────────────────────────────────
 const $ = (sel) => document.querySelector(sel);
 
@@ -151,45 +158,14 @@ function savePrModes() {
   try { localStorage.setItem('lgtm-pr-modes', JSON.stringify(prModeOverrides)); } catch { /* ignore */ }
 }
 
-// Author-based default — used when the PR isn't approved AND the user
-// hasn't set an override. Author → resolve; everyone else → review.
-function authorDefaultMode(pr) {
-  if (currentUser && pr.createdBy && pr.createdBy === currentUser.displayName) {
-    return 'resolve';
-  }
-  return 'review';
-}
-
-function defaultPrMode(pr) {
-  if (pr.isApproved) return 'approved';
-  return authorDefaultMode(pr);
-}
-
+// The mode chip: the user's override, else approved / author-based default.
+// The cycle itself is LgtmLogic.cyclePrMode; this just owns the state.
 function getPrMode(pr) {
-  const key = `${pr.project}/${pr.repo}/${pr.id}`;
-  return prModeOverrides[key] || defaultPrMode(pr);
+  return resolvePrMode(pr, prModeOverrides, currentUser);
 }
 
-// Click cycle:
-//   approved-PR (no override): approved → review → resolve → approved
-//   non-approved PR:           review ↔ resolve
-// Going back to "approved" is achieved by clearing the override so
-// defaultPrMode kicks in again.
 function togglePrMode(pr) {
-  const key = `${pr.project}/${pr.repo}/${pr.id}`;
-  const current = getPrMode(pr);
-
-  if (pr.isApproved) {
-    if (current === 'approved') {
-      prModeOverrides[key] = 'review';
-    } else if (current === 'review') {
-      prModeOverrides[key] = 'resolve';
-    } else {
-      delete prModeOverrides[key];
-    }
-  } else {
-    prModeOverrides[key] = current === 'review' ? 'resolve' : 'review';
-  }
+  prModeOverrides = cyclePrMode(pr, prModeOverrides, currentUser);
   savePrModes();
 }
 
@@ -367,6 +343,12 @@ patSubmit.addEventListener('click', async () => {
 
   const result = await window.lgtm.validatePat(pat, orgUrl);
   if (result.success) {
+    // The PAT works; whether it was saved is a separate answer. A refusing
+    // OS keychain means the PAT is in memory for this session only, and
+    // the user needs to know that before they wonder why it asks again.
+    if (result.storage && !result.storage.ok) {
+      alert(`Connected, but the PAT was not saved: ${result.storage.error}`);
+    }
     // Load agents + settings BEFORE switching views — the toolbar
     // agent dropdown, per-tab agent dropdowns, repo config buttons,
     // and starred-repo state all render against the `agents` /
@@ -452,12 +434,7 @@ function renderPrList(prs) {
   });
 
   // Sort: starred repos first, then alphabetical within each group
-  const repoKeys = Object.keys(grouped).sort((a, b) => {
-    const aStarred = starredRepos.has(a) ? 0 : 1;
-    const bStarred = starredRepos.has(b) ? 0 : 1;
-    if (aStarred !== bStarred) return aStarred - bStarred;
-    return a.localeCompare(b);
-  });
+  const repoKeys = sortRepoKeys(Object.keys(grouped), starredRepos);
 
   // Render each repo group
   repoKeys.forEach((repoKey) => {
@@ -539,9 +516,8 @@ function renderPrList(prs) {
         const dotClass = reviewStatus || pr.reviewStatus || 'pending';
 
         const item = document.createElement('div');
-        const prAgeMs = pr.createdDate ? (Date.now() - new Date(pr.createdDate).getTime()) : 0;
-        const prAgeDays = Math.floor(prAgeMs / (24 * 60 * 60 * 1000));
-        const isOld = prAgeDays > maxPrAgeDays;
+        const ageDays = prAgeDays(pr);
+        const isOld = ageDays > maxPrAgeDays;
         const isCloning = reviewStatus === 'cloning';
         item.className = `pr-item grouped${isOld ? ' stale' : ''}${isCloning ? ' cloning' : ''}`;
 
@@ -551,7 +527,7 @@ function renderPrList(prs) {
         dot.title = dotClass;
 
         // Age label
-        const ageStr = prAgeDays === 0 ? 'today' : prAgeDays === 1 ? '1d ago' : `${prAgeDays}d ago`;
+        const ageStr = ageDays === 0 ? 'today' : ageDays === 1 ? '1d ago' : `${ageDays}d ago`;
 
         // Info — show just PR number + title since repo is in the header
         const info = document.createElement('div');
@@ -662,10 +638,9 @@ function renderPrList(prs) {
 
         if (!reviewStatus && revealedRows.has(key)) {
           // Reveal state: Play + dismiss
-          const chipMode = getPrMode(pr);
           // Effective action: 'approved' falls back to the author-based
           // default, matching what startReview() will dispatch.
-          const mode = chipMode === 'approved' ? authorDefaultMode(pr) : chipMode;
+          const mode = actionModeFor(pr, prModeOverrides, currentUser);
           const playBtn = document.createElement('button');
           playBtn.className = 'btn-play-row';
           playBtn.textContent = '▶';  // ▶
@@ -840,32 +815,14 @@ async function startAutoReview() {
   autoReviewRunning = true;
   updateAutoReviewBtn();
 
-  // Filter by age, then sort: starred repos first, then unstarred
-  const cutoffMs = maxPrAgeDays * 24 * 60 * 60 * 1000;
-  const now = Date.now();
-  const queue = [...currentPrs]
-    .filter((pr) => {
-      if (!pr.createdDate) return true;  // include if no date (shouldn't happen)
-      return (now - new Date(pr.createdDate).getTime()) <= cutoffMs;
-    })
-    .sort((a, b) => {
-      const aKey = `${a.project}/${a.repo}`;
-      const bKey = `${b.project}/${b.repo}`;
-      const aStarred = starredRepos.has(aKey) ? 0 : 1;
-      const bStarred = starredRepos.has(bKey) ? 0 : 1;
-      if (aStarred !== bStarred) return aStarred - bStarred;
-      return aKey.localeCompare(bKey);
-    });
+  // Filter by age, drop PRs already running/cloning/completed, then sort:
+  // starred repos first, then unstarred (LgtmLogic.buildAutoReviewQueue).
+  const queue = buildAutoReviewQueue(currentPrs, { starredRepos, maxPrAgeDays, reviewStatuses });
 
   for (const pr of queue) {
     if (!autoReviewRunning) break;  // user cancelled
 
     const key = `${pr.project}/${pr.repo}/${pr.id}`;
-    const existing = reviewStatuses[key];
-    // Skip PRs that are already running, cloning, or completed
-    if (existing && (existing.status === 'running' || existing.status === 'cloning' || existing.status === 'completed')) {
-      continue;
-    }
 
     // Start the review and wait for it to finish before moving to next
     await startReview(pr);
@@ -887,7 +844,9 @@ function waitForReviewComplete(key) {
   return new Promise((resolve) => {
     const check = () => {
       const review = reviewStatuses[key];
-      if (!review || review.status === 'completed' || review.status === 'failed') {
+      // Regression: 'cancelled' used to be missing here, so cancelling one
+      // review from the detail view stalled the auto-review queue forever.
+      if (!review || isTerminalStatus(review.status)) {
         resolve();
       } else if (!autoReviewRunning) {
         resolve();  // cancelled
@@ -922,8 +881,7 @@ async function startReview(pr) {
   const model = agentModels[agentId] || null;
   // 'approved' is informational — pressing play falls back to the
   // author-based default action so the agent has something to do.
-  const chipMode = getPrMode(pr);
-  const mode = chipMode === 'approved' ? authorDefaultMode(pr) : chipMode;
+  const mode = actionModeFor(pr, prModeOverrides, currentUser);
 
   // Optimistically show cloning state
   reviewStatuses[key] = { status: 'cloning', agentId, output: '' };
@@ -1227,18 +1185,6 @@ function renderOutput() {
     const lines = text ? text.split('\n').length : 0;
     rdOutputMetaEl.textContent = `${lines.toLocaleString()} lines · ${text.length.toLocaleString()} chars${term ? ` · filter: "${term}"` : ''}`;
   }
-}
-
-function renderMarkdownToHtml(text) {
-  let html = escHtml(text);
-  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="lang-$1">$2</code></pre>');
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>');
-  html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>');
-  html = html.replace(/^# (.+)$/gm, '<h2>$1</h2>');
-  html = html.replace(/\n/g, '<br>');
-  return html;
 }
 
 function escapeRegex(s) {
@@ -2651,6 +2597,7 @@ async function bootFromPatStatus() {
     const u = await window.lgtm.getMe();
     if (u) currentUser = u;
   } catch { /* ignore */ }
+  if (status.storageWarning) console.warn('[LGTM] PAT storage:', status.storageWarning);
   showView(prListView);
   subtitleEl.textContent = (status.orgUrl || '').replace('https://dev.azure.com/', '');
   if (!bugsLoaded) {
@@ -2788,13 +2735,6 @@ function esc(str) {
   const el = document.createElement('span');
   el.textContent = str || '';
   return el.innerHTML;
-}
-
-function escHtml(str) {
-  return (str || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
 }
 
 function stripAnsi(s) {
