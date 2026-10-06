@@ -62,9 +62,12 @@
   /**
    * Author-based default — used when the PR isn't approved AND the user
    * hasn't set an override. Author → resolve; everyone else → review.
+   * Azure DevOps rows name the author by display name; GitHub rows by
+   * login, so either match counts.
    */
   function authorDefaultMode(pr, currentUser) {
-    if (currentUser && pr.createdBy && pr.createdBy === currentUser.displayName) {
+    if (currentUser && pr.createdBy
+      && (pr.createdBy === currentUser.displayName || (currentUser.login && pr.createdBy === currentUser.login))) {
       return 'resolve';
     }
     return 'review';

@@ -15,7 +15,9 @@
  */
 
 const SETTINGS_DEFAULTS = Object.freeze({
-  orgUrl: '',
+  orgUrl: '',                // Azure DevOps organisation URL (legacy key, still the ADO one)
+  providerUrls: {},          // { [providerId]: url } — GitHub and any future service
+  activeProvider: '',        // which connected service the renderer shows
   webhookPort: 3847,
   webhookHost: '127.0.0.1',  // loopback by default; set to '0.0.0.0' to accept LAN/tunnel traffic directly
   webhookSecret: '',         // when set, POST /webhook must carry it in X-LGTM-Webhook-Secret
@@ -43,9 +45,11 @@ const SETTINGS_DEFAULTS = Object.freeze({
 
 const SETTINGS_KEYS = Object.freeze(Object.keys(SETTINGS_DEFAULTS));
 
-// Keys the Settings screen may write. `orgUrl` is owned by the PAT flow
-// (validate-pat sets it, clear-pat clears it) and is deliberately absent.
-const SAVEABLE_KEYS = Object.freeze(SETTINGS_KEYS.filter((k) => k !== 'orgUrl'));
+// Keys the Settings screen may write. The connection keys are owned by the
+// connect flow (connect-provider sets them, disconnect-provider clears them,
+// set-active-provider switches) and are deliberately absent.
+const CONNECTION_KEYS = Object.freeze(['orgUrl', 'providerUrls', 'activeProvider']);
+const SAVEABLE_KEYS = Object.freeze(SETTINGS_KEYS.filter((k) => !CONNECTION_KEYS.includes(k)));
 
 /**
  * @param {new (options) => object} StoreClass - electron-store or conf
@@ -92,6 +96,7 @@ function clone(v) {
 module.exports = {
   SETTINGS_DEFAULTS,
   SETTINGS_KEYS,
+  CONNECTION_KEYS,
   SAVEABLE_KEYS,
   createSettingsStore,
   readSettings,

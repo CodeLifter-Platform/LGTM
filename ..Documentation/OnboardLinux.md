@@ -22,7 +22,14 @@ npm start
 ```
 
 **What you should see:** an ordinary application window, framed, in the taskbar, opening at
-launch. That is not a bug and not a fallback — it is the intended Linux behaviour.
+launch. That is not a bug and not a fallback — it is the intended Linux behaviour. Connect
+Azure DevOps, GitHub, or both from the first screen.
+
+## Test
+
+```bash
+npm test
+```
 
 ## Why the window model differs
 

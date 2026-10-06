@@ -35,7 +35,11 @@ test('A_missing_scenario_file_fails_at_load_naming_the_file', () => {
 
 test('A_preamble_file_without_the_agent_heading_fails_at_load_naming_the_heading', () => {
   const dir = tempDir();
-  for (const f of fs.readdirSync(REAL_PROMPTS)) fs.copyFileSync(path.join(REAL_PROMPTS, f), path.join(dir, f));
+  // The Azure DevOps set (the root files) loads first; the GitHub subfolder
+  // is not needed to reach the heading check.
+  for (const f of fs.readdirSync(REAL_PROMPTS)) {
+    if (fs.statSync(path.join(REAL_PROMPTS, f)).isFile()) fs.copyFileSync(path.join(REAL_PROMPTS, f), path.join(dir, f));
+  }
   const preambles = fs.readFileSync(path.join(dir, '00-agent-preambles.md'), 'utf8').replace('## Codex', '## Kodex');
   fs.writeFileSync(path.join(dir, '00-agent-preambles.md'), preambles);
   const sp = new ScenarioPrompts();

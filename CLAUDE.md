@@ -15,16 +15,17 @@
 
 <!-- App-specific rules only. Platform-wide standards live in the harness. -->
 
-LGTM is a cross-platform menu-bar app that lists your open Azure DevOps pull requests and
-runs AI-powered code reviews on them with one click. It is the platform's one
-Electron/Node app; the .NET conventions in the harness do not apply here, but design
-tokens, theming, versioning, and release conventions do.
+LGTM is a cross-platform menu-bar app that lists your open pull requests, bugs and tickets
+from Azure DevOps and GitHub and runs AI-powered agents on them with one click. It is the
+platform's one Electron/Node app; the .NET conventions in the harness do not apply here,
+but design tokens, theming, versioning, and release conventions do.
 
 ## Quick start
 
 ```bash
 npm install
 npm start
+npm test          # node --test over tests/; no Electron needed
 ```
 
 ```bash
@@ -43,40 +44,58 @@ npm run build:mac
   README links when convenient; the org repo is canonical.
 - **Electron, so no `global.json` / `Directory.*.props`.** The .NET conformance check
   skips this repo automatically because it has no root `.sln`.
-- **The PAT lives in the OS keychain and nowhere else** (`src/main/pat-store.js`). A
-  refusing or hanging keychain is reported to the user (the PAT stays in memory for the
-  session), never worked around with a file. The pre-0.6 obfuscated file store
-  (`lgtm-secure.json`, key hard-coded in source) is read once to migrate an existing
-  PAT into the keychain and then emptied; nothing writes to it. On Linux without a
-  running Secret Service this means re-entering the PAT each launch, by design.
+- **Tokens live in the OS keychain and nowhere else** (`src/main/token-store.js`, one
+  entry per git service). A refusing or hanging keychain is reported to the user (the
+  token stays in memory for the session), never worked around with a file. The pre-0.6
+  obfuscated file store (`lgtm-secure.json`, key hard-coded in source) is read once to
+  migrate an existing Azure DevOps PAT into the keychain and then emptied; nothing writes
+  to it. On Linux without a running Secret Service this means re-entering the token each
+  launch, by design.
 - **The webhook server binds to loopback** (`webhookHost`, default `127.0.0.1`) and caps
   request bodies at 1 MiB. Azure DevOps reaches it through a tunnel that forwards to
   localhost; set `webhookHost` to `0.0.0.0` in `config.json` only for a machine that is
   meant to take LAN traffic. An optional `webhookSecret` (config.json, no UI yet) makes
   `POST /webhook` require the `X-LGTM-Webhook-Secret` header, compared in constant time;
-  `GET /health` stays open.
+  `GET /health` stays open. GitHub webhooks and Azure DevOps service hooks share the one
+  route; the provider registry decides which service an event belongs to.
+- **Design tokens live in `src/renderer/tokens.css`**, a verbatim port of
+  `Platform-Design/tokens/*.css` in the design system's own CSS notation (light is the
+  design system's light-cool scope). `styles.css` references tokens only; `ios/LGTM/Theme.swift`
+  mirrors the same values. Change the port and the mirror in the same commit.
+- **Git services are providers** (`src/main/providers/`). Every PR / work item row carries
+  `provider`; the renderer never branches on the service beyond number prefixes and hint
+  nouns. A new service is one registry entry, a client with the same row shapes, a prompt
+  set under `resources/prompts/<id>/`, and a `token-store.js` entry.
+- **The scenario prompt files are verbatim inputs.** The Azure DevOps set at
+  `resources/prompts/` and the GitHub set in `resources/prompts/github/` differ only in
+  the service-access sections; keep them in step when changing workflow text.
+- **Parity gap, recorded:** the iPad head under `ios/` is Azure DevOps only (no GitHub
+  client, no provider switch). See `..Documentation/LivingSpec.md` → Known gaps.
 
 ## Testing
 
 The suite follows `Platform-Standards/process/testing.md`. It runs on the built-in Node
 runner with no test dependencies, and nothing under `tests/` requires `electron` or
 `keytar`: the main-process modules take their collaborators as constructor arguments
-(`AgentRunner`'s notifier, spawn and factories; `PatStore`'s keychain; `AgentRegistry`'s
-`which`; `DevOpsSession`'s factories), and `src/main/main.js` is the only file that
-wires the Electron ones in.
+(`AgentRunner`'s notifier, spawn and cloner factory; `TokenStore`'s keychain;
+`AgentRegistry`'s `which`; `RepoCloner`'s connection; `PrPoller`'s fetch), and
+`src/main/main.js` is the only file that wires the Electron ones in.
 
 ```bash
 npm test                 # node --test tests/**/*.test.js
 npm run test:coverage    # same, with the coverage table on stdout and coverage/lcov.info
 ```
 
-Layout: `tests/core` (parsers, prompt assembly, mapping), `tests/data` (settings and PAT
-stores), `tests/wire` (the real `azure-devops-node-api` client against a fake Azure
-DevOps server that serves the SDK's route discovery), `tests/auth` (webhook trust
-boundary), `tests/failure` (agent runner, poller/session, cloner), `tests/renderer`
-(`src/renderer/logic.js`, the DOM-free half of the UI), `tests/integration` (the canary:
-fake ADO + real client + real git clone + real prompts + a fake agent process). Shared
-fakes are in `tests/helpers/fakes.js`; the agent stand-in is `tests/fixtures/fake-agent.js`.
+Layout: `tests/core` (parsers, prompt assembly and the per-provider prompt sets, mapping,
+the provider registry), `tests/data` (the settings and token stores), `tests/wire` (the
+real `azure-devops-node-api` client against a fake Azure DevOps server that serves the
+SDK's route discovery; the GitHub client against a scripted HTTP stub; the startup token
+check through the real axios adapter), `tests/auth` (webhook trust boundary),
+`tests/failure` (agent runner, poller, cloner), `tests/renderer` (`src/renderer/logic.js`,
+the DOM-free half of the UI), `tests/integration` (the canary: fake ADO + the shipped
+`Connection` and client + real git clone + real prompts + a fake agent process). Shared
+fakes are in `tests/helpers/fakes.js` and `tests/helpers/scripted-http.js`; the agent
+stand-in is `tests/fixtures/fake-agent.js`.
 Only `tests/` is discovered: `.touchdown/` and `Handoffs/` hold stale copies that must
 never be picked up.
 
@@ -89,7 +108,7 @@ the repo is public.
 Rows of the standard's table that do not apply here, and why:
 
 - **Persistence (database)**: there is no database. The two stores (`config.json` via
-  electron-store, the PAT via keytar) are covered under `tests/data`.
+  electron-store, the tokens via keytar) are covered under `tests/data`.
 - **Parsers and importers**: LGTM imports no user files. The parsers it has (org URL,
   `auggie model list`, the agents' fenced JSON report, DevOps HTML) are in `tests/core`.
 - **AI wire contract**: there is no model API client. The contract with an agent is CLI

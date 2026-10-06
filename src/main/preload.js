@@ -1,22 +1,24 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('lgtm', {
-  // PAT
-  validatePat: (pat, orgUrl) => ipcRenderer.invoke('validate-pat', { pat, orgUrl }),
-  getPatStatus: () => ipcRenderer.invoke('get-pat-status'),
-  clearPat: () => ipcRenderer.invoke('clear-pat'),
-  getMe: () => ipcRenderer.invoke('get-me'),
-  onCurrentUser: (cb) => ipcRenderer.on('current-user', (_e, u) => cb(u)),
+  // Connections (one per git service: 'azure-devops' | 'github')
+  getProviders: () => ipcRenderer.invoke('get-providers'),
+  getConnectionStatus: () => ipcRenderer.invoke('get-connection-status'),
+  connectProvider: ({ providerId, token, url }) => ipcRenderer.invoke('connect-provider', { providerId, token, url }),
+  disconnectProvider: (providerId) => ipcRenderer.invoke('disconnect-provider', providerId),
+  setActiveProvider: (providerId) => ipcRenderer.invoke('set-active-provider', providerId),
+  getMe: (providerId) => ipcRenderer.invoke('get-me', providerId),
+  onCurrentUser: (cb) => ipcRenderer.on('current-user', (_e, data) => cb(data)),
+  onConnectionStatus: (cb) => ipcRenderer.on('connection-status', (_e, status) => cb(status)),
 
-  // PRs
-  refreshPrs: () => ipcRenderer.invoke('refresh-prs'),
+  // PRs (params: { provider })
+  refreshPrs: (params) => ipcRenderer.invoke('refresh-prs', params),
 
-  // Bugs (params: { scope: 'mine'|'all', prFilter: 'all'|'has'|'none' })
+  // Bugs (params: { provider, scope: 'mine'|'all', prFilter: 'all'|'has'|'none' })
   refreshBugs: (params) => ipcRenderer.invoke('refresh-bugs', params),
 
   // Work items (non-bug tickets) — same params shape as refreshBugs
   refreshWorkItems: (params) => ipcRenderer.invoke('refresh-workitems', params),
-
 
   // External
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
@@ -24,7 +26,7 @@ contextBridge.exposeInMainWorld('lgtm', {
   reviewPr: ({ pr, agentId, model, mode }) => ipcRenderer.invoke('review-pr', { pr, agentId, model, mode }),
   startWorkItemAction: ({ workItem, repoInfo, agentId, model, promptFile }) =>
     ipcRenderer.invoke('start-workitem-action', { workItem, repoInfo, agentId, model, promptFile }),
-  getReposForProject: (project) => ipcRenderer.invoke('get-repos-for-project', project),
+  getReposForProject: (project, provider) => ipcRenderer.invoke('get-repos-for-project', { project, provider }),
   cancelReview: (key) => ipcRenderer.invoke('cancel-review', key),
   getReviews: () => ipcRenderer.invoke('get-reviews'),
   getReviewOutput: (key) => ipcRenderer.invoke('get-review-output', key),
@@ -55,7 +57,7 @@ contextBridge.exposeInMainWorld('lgtm', {
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (s) => ipcRenderer.invoke('save-settings', s),
   getPromptConventions: () => ipcRenderer.invoke('get-prompt-conventions'),
-  getRepoFileTree: (project, repoName) => ipcRenderer.invoke('get-repo-file-tree', { project, repoName }),
+  getRepoFileTree: (project, repoName, provider) => ipcRenderer.invoke('get-repo-file-tree', { project, repoName, provider }),
   pickFile: () => ipcRenderer.invoke('pick-file'),
 
   // Starred repos
@@ -73,9 +75,8 @@ contextBridge.exposeInMainWorld('lgtm', {
   onUpdateDownloaded: (cb) => ipcRenderer.on('update-downloaded', () => cb()),
 
   // Events from main → renderer
-  onPrList: (cb) => ipcRenderer.on('pr-list', (_e, prs) => cb(prs)),
-  onPrError: (cb) => ipcRenderer.on('pr-error', (_e, msg) => cb(msg)),
-  onPatStatus: (cb) => ipcRenderer.on('pat-status', (_e, status) => cb(status)),
+  onPrList: (cb) => ipcRenderer.on('pr-list', (_e, data) => cb(data)),
+  onPrError: (cb) => ipcRenderer.on('pr-error', (_e, data) => cb(data)),
   onReviewUpdate: (cb) => ipcRenderer.on('review-update', (_e, data) => cb(data)),
   onReviewOutput: (cb) => ipcRenderer.on('review-output', (_e, data) => cb(data)),
   onShowSettings: (cb) => ipcRenderer.on('show-settings', () => cb()),

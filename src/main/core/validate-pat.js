@@ -1,6 +1,8 @@
 /**
- * validatePat — prove a PAT works against an org by listing its projects,
- * and turn every way that can fail into a sentence the user can act on.
+ * validateConnection — prove a token works against a git service by listing
+ * what it can see (projects on Azure DevOps, owners on GitHub), and turn
+ * every way that can fail into a sentence the user can act on.
+ * `validatePat` is the Azure DevOps-only form the first version shipped.
  *
  * Two error shapes reach us and both are mapped:
  *   - axios (`err.response.status`) from the raw-HTTP helpers, and
@@ -24,8 +26,30 @@ function statusOf(err) {
 }
 
 /**
- * Map a thrown error to the message the renderer shows. Always returns a
- * string; never rethrows.
+ * Map a thrown error to the message the renderer shows, for any provider.
+ * `provider` is a registry entry (label, urlLabel, scopes); without one the
+ * Azure DevOps wording is used. Always returns a string; never rethrows.
+ */
+function describeConnectionError(err, { url, provider } = {}) {
+  const status = statusOf(err);
+  const message = (err && err.message) || String(err);
+  if (provider && provider.id !== 'azure-devops') {
+    if (status === 404) {
+      return `404 Not Found — check the ${provider.urlLabel.toLowerCase()} (${url}).`;
+    }
+    if (status === 401 || status === 403) {
+      return `${status} — the ${provider.label} token was rejected. Make sure it hasn't expired and has these scopes: ${provider.scopes.join(', ')}.`;
+    }
+    if (/timed out/i.test(message)) {
+      return `${message}. ${provider.label} at ${url} did not answer in time — check the URL and your network.`;
+    }
+    return message;
+  }
+  return describeValidationError(err, url);
+}
+
+/**
+ * The Azure DevOps wording. Always returns a string; never rethrows.
  */
 function describeValidationError(err, orgUrl) {
   const parsed = parseOrgUrl(orgUrl);
@@ -60,24 +84,41 @@ function describeValidationError(err, orgUrl) {
  *                 | { success: false, error: string }>}
  */
 async function validatePat({ pat, orgUrl, createClient, timeoutMs = 20000 }) {
-  const parsed = parseOrgUrl(orgUrl);
+  return validateConnection({ token: pat, url: orgUrl, createClient, timeoutMs });
+}
+
+/**
+ * @param {object} opts
+ * @param {string} opts.token
+ * @param {string} opts.url                              - as typed by the user
+ * @param {() => { getProjects(): Promise }} opts.createClient - returns the provider client
+ * @param {object} [opts.provider]                       - registry entry; Azure DevOps when absent
+ * @param {number} [opts.timeoutMs]
+ * @returns {Promise<{ success: true, projects: string[], filterNote: string }
+ *                 | { success: false, error: string }>}
+ */
+async function validateConnection({ token, url, createClient, provider = null, timeoutMs = 20000 }) {
+  const isAdo = !provider || provider.id === 'azure-devops';
+  const parsed = isAdo ? parseOrgUrl(url) : { orgUrl: (url || '').trim(), project: null };
   if (!parsed.orgUrl || !/^https?:\/\//i.test(parsed.orgUrl)) {
-    return { success: false, error: `"${orgUrl}" is not a URL. Enter the org URL, e.g. https://dev.azure.com/<org>.` };
+    const example = isAdo ? 'https://dev.azure.com/<org>' : 'https://github.com/<owner>';
+    return { success: false, error: `"${url}" is not a URL. Enter the ${isAdo ? 'org URL' : (provider.urlLabel || 'service URL')}, e.g. ${example}.` };
   }
-  if (!pat) {
+  if (!token) {
     return { success: false, error: 'Enter a Personal Access Token.' };
   }
 
+  const noun = isAdo ? 'projects' : `${provider.groupNoun || 'owner'}s`;
   try {
-    const client = createClient(pat, orgUrl);
+    const client = createClient(token, url);
     const projects = await withTimeout(client.getProjects(), timeoutMs, 'getProjects');
     if (projects == null) {
       // typed-rest-client turns a 404 (and a non-JSON body such as a
       // sign-in page) into a null result rather than an error.
-      return { success: false, error: describeValidationError({ statusCode: 404 }, orgUrl) };
+      return { success: false, error: describeConnectionError({ statusCode: 404 }, { url, provider }) };
     }
     if (projects.length === 0) {
-      return { success: false, error: 'PAT valid but no projects found.' };
+      return { success: false, error: isAdo ? 'PAT valid but no projects found.' : `Token accepted but nothing to list — no ${noun} visible.` };
     }
     return {
       success: true,
@@ -85,7 +126,7 @@ async function validatePat({ pat, orgUrl, createClient, timeoutMs = 20000 }) {
       filterNote: parsed.project ? ` Filtered to project "${parsed.project}".` : '',
     };
   } catch (err) {
-    return { success: false, error: describeValidationError(err, orgUrl) };
+    return { success: false, error: describeConnectionError(err, { url, provider }) };
   }
 }
 
@@ -101,4 +142,4 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-module.exports = { validatePat, describeValidationError, withTimeout };
+module.exports = { validatePat, validateConnection, describeValidationError, describeConnectionError, withTimeout };

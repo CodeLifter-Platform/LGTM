@@ -1,6 +1,6 @@
 /**
  * WebhookServer — Lightweight HTTP server that receives Azure DevOps
- * Service Hook events for real-time PR updates.
+ * Service Hook events and GitHub webhooks for real-time PR updates.
  *
  * Setup in Azure DevOps:
  *   Project Settings → Service Hooks → Create subscription
@@ -20,6 +20,14 @@
  *   - Bodies above `maxBodyBytes` (1 MiB default) are refused with 413 and
  *     the connection dropped; a real service-hook payload is a few KB.
  *   - Anything else is a 404.
+ *
+ * Setup in GitHub:
+ *   Repo or org Settings → Webhooks → Add webhook
+ *   → Payload URL: http://<your-machine>:<port>/webhook, content type JSON
+ *   → events: Pull requests, Pull request reviews, Issues
+ *
+ * The callback receives the parsed body and the request headers; the
+ * provider registry decides which service an event belongs to.
  */
 
 const http = require('http');
@@ -40,7 +48,7 @@ function secretsMatch(expected, provided) {
 class WebhookServer {
   /**
    * @param {number} port          - Port to listen on (0 = any free port; `start()` resolves the real one)
-   * @param {function} onEvent     - Callback invoked with each parsed event payload
+   * @param {function} onEvent     - Callback invoked with (payload, headers) for each parsed event
    * @param {object} [opts]
    * @param {string} [opts.host]          - bind address, default loopback
    * @param {string} [opts.secret]        - shared secret required on POST /webhook when non-empty
@@ -136,7 +144,7 @@ class WebhookServer {
         } catch {
           return json(400, { error: 'Invalid JSON' });
         }
-        try { this.onEvent(event); } catch (err) { this.log(`[LGTM] webhook handler threw: ${err.message}`); }
+        try { this.onEvent(event, req.headers || {}); } catch (err) { this.log(`[LGTM] webhook handler threw: ${err.message}`); }
         json(200, { received: true });
       });
       return undefined;

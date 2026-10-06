@@ -19,9 +19,18 @@ const reviewDetailView  = $('#review-detail-view');
 const agentDetailView   = $('#agent-detail-view');
 
 const orgUrlInput   = $('#org-url');
+const orgUrlLabel   = $('#org-url-label');
+const orgUrlHint    = $('#org-url-hint');
 const patInput      = $('#pat-input');
+const patLabel      = $('#pat-label');
+const patScopes     = $('#pat-scopes');
 const patSubmit     = $('#pat-submit');
+const patCancel     = $('#pat-cancel');
 const patStatusMsg  = $('#pat-status-msg');
+const providerTabs  = $('#provider-tabs');
+const providerSelect = $('#provider-select');
+const connectionList = $('#connection-list');
+const settingsBack  = $('#settings-back');
 
 const prListEl      = $('#pr-list');
 const noPrsEl       = $('#no-prs');
@@ -115,10 +124,32 @@ const agentConfigList   = $('#agent-config-list');
 const repoConfigList    = $('#repo-config-list');
 const conventionHint    = $('#convention-hint');
 const settingsSave      = $('#settings-save');
-const disconnectBtn     = $('#disconnect-btn');
 const subtitleEl        = $('#subtitle');
 
 // ── State ────────────────────────────────────────────────────────
+// Providers: the git services LGTM can connect to. `providers` is the
+// renderer-safe definition list from main (labels, placeholders, scopes);
+// `connStatus` is the live connected/not map; `activeProvider` is the
+// top-level filter the toolbar select drives. Each list (PRs, bugs,
+// tickets) is cached per provider so switching back is instant.
+let providers = [];
+let connStatus = { providers: {}, activeProvider: '', hasConnection: false };
+let activeProvider = '';
+let gateProvider = 'azure-devops';   // which tab is selected on the connect gate
+const prsByProvider = {};
+const bugsByProvider = {};
+const ticketsByProvider = {};
+const usersByProvider = {};
+const loadedByProvider = {};         // { [provider]: { bugs: bool, tickets: bool } }
+
+function providerDef(id) {
+  return providers.find((p) => p.id === (id || activeProvider)) || providers[0] || { id, label: id, groupNoun: 'project', sprintNoun: 'sprint recency', openLabel: 'Open in browser' };
+}
+function connectedProviderIds() {
+  return Object.values(connStatus.providers || {}).filter((p) => p.connected).map((p) => p.providerId);
+}
+function isConnected(id) { return !!(connStatus.providers && connStatus.providers[id] && connStatus.providers[id].connected); }
+
 let currentPrs = [];
 let reviewStatuses = {};     // key → { status, agentId, output }
 let agents = [];
@@ -133,9 +164,7 @@ let knownRepos = new Set();  // "project/repo" strings from PR list
 let autoReviewRunning = false;
 let currentBugs = [];
 let activeTab = 'prs';
-let bugsLoaded = false;
 let currentTickets = [];
-let ticketsLoaded = false;
 // Filter state for the bugs / tickets tabs — hydrated from settings on
 // boot. Defaults mirror what the user picks first time: "mine" and "no
 // PR" (the actionable pile). Persisted via saveSettings on change.
@@ -147,7 +176,7 @@ let revealedRows = new Set();       // row keys currently showing Play/dismiss
 let lastUsedRepos = {};             // { project: repoName } — remembered picker default
 let repoCache = {};                 // { project: [{ id, name }] } — per-session repo list
 
-// Authenticated user (so we can flag "my PRs")
+// Authenticated user on the active provider (so we can flag "my PRs")
 let currentUser = null;
 let prModeOverrides = {};  // "project/repo/id" → 'review' | 'resolve'
 try {
@@ -159,13 +188,18 @@ function savePrModes() {
 }
 
 // The mode chip: the user's override, else approved / author-based default.
-// The cycle itself is LgtmLogic.cyclePrMode; this just owns the state.
+// The cycle itself is LgtmLogic.cyclePrMode; this just owns the state. The
+// author comparison uses the user of the service the row came from.
+function userForPr(pr) {
+  return usersByProvider[pr.provider || activeProvider] || currentUser;
+}
+
 function getPrMode(pr) {
-  return resolvePrMode(pr, prModeOverrides, currentUser);
+  return resolvePrMode(pr, prModeOverrides, userForPr(pr));
 }
 
 function togglePrMode(pr) {
-  prModeOverrides = cyclePrMode(pr, prModeOverrides, currentUser);
+  prModeOverrides = cyclePrMode(pr, prModeOverrides, userForPr(pr));
   savePrModes();
 }
 
@@ -180,14 +214,15 @@ let ticketsRepoConfigs = {};
 // ── Theme toggle ─────────────────────────────────────────────────
 const themeToggleBtn = $('#theme-toggle');
 function applyThemeIcon() {
-  const isLight = document.documentElement.classList.contains('light');
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
   // ☀ sun when light (click → dark), ☾ crescent when dark (click → light)
   themeToggleBtn.innerHTML = isLight ? '&#9728;' : '&#9790;';
   themeToggleBtn.title = isLight ? 'Switch to dark mode' : 'Switch to light mode';
 }
 themeToggleBtn.addEventListener('click', () => {
-  const nextIsLight = !document.documentElement.classList.contains('light');
-  document.documentElement.classList.toggle('light', nextIsLight);
+  const nextIsLight = document.documentElement.getAttribute('data-theme') !== 'light';
+  if (nextIsLight) document.documentElement.setAttribute('data-theme', 'light');
+  else document.documentElement.removeAttribute('data-theme');
   try { localStorage.setItem('lgtm-theme', nextIsLight ? 'light' : 'dark'); } catch { /* ignore */ }
   applyThemeIcon();
 });
@@ -252,17 +287,18 @@ function applyFilterSelectsFromState() {
 }
 
 function updateFilterHints() {
-  if (bugsHint) bugsHint.innerHTML = describeFilter('Open bugs', bugsFilters, 'priority within each');
-  if (ticketsHint) ticketsHint.innerHTML = describeFilter('Open tickets', ticketsFilters, 'sprint recency');
+  const def = providerDef();
+  if (bugsHint) bugsHint.innerHTML = describeFilter('Open bugs', bugsFilters, 'priority within each', def.groupNoun);
+  if (ticketsHint) ticketsHint.innerHTML = describeFilter('Open tickets', ticketsFilters, def.sprintNoun, def.groupNoun);
 }
 
-function describeFilter(prefix, filters, sortNote) {
+function describeFilter(prefix, filters, sortNote, groupNoun = 'project') {
   const who = filters.scope === 'mine' ? '<strong>assigned to you</strong>' : '<strong>across all assignees</strong>';
   let pr;
   if (filters.prFilter === 'has')  pr = ' with a linked PR';
   else if (filters.prFilter === 'none') pr = ' without a linked PR';
   else pr = '';
-  return `${prefix} ${who}${pr} · grouped by project · sorted by ${sortNote}`;
+  return `${prefix} ${who}${pr} · grouped by ${groupNoun} · sorted by ${sortNote}`;
 }
 
 function renderTabAgentSelects() {
@@ -301,15 +337,15 @@ async function onBugsFilterChange() {
   bugsFilters = { scope: bugsScopeFilter.value, prFilter: bugsPrFilter.value };
   updateFilterHints();
   await window.lgtm.saveSettings({ bugsFilters });
-  const result = await window.lgtm.refreshBugs(bugsFilters);
-  if (result && result.success) renderBugList(result.bugs);
+  for (const id of connectedProviderIds()) loadedByProvider[id] = { ...(loadedByProvider[id] || {}), bugs: false };
+  await refreshBugs();
 }
 async function onTicketsFilterChange() {
   ticketsFilters = { scope: ticketsScopeFilter.value, prFilter: ticketsPrFilter.value };
   updateFilterHints();
   await window.lgtm.saveSettings({ ticketsFilters });
-  const result = await window.lgtm.refreshWorkItems(ticketsFilters);
-  if (result && result.success) renderTicketList(result.items);
+  for (const id of connectedProviderIds()) loadedByProvider[id] = { ...(loadedByProvider[id] || {}), tickets: false };
+  await refreshTickets();
 }
 bugsScopeFilter    && bugsScopeFilter.addEventListener('change', onBugsFilterChange);
 bugsPrFilter       && bugsPrFilter.addEventListener('change', onBugsFilterChange);
@@ -331,57 +367,184 @@ function renderAgentSelect() {
 
 agentSelect.addEventListener('change', () => { selectedAgent = agentSelect.value; });
 
-// ── PAT flow ─────────────────────────────────────────────────────
+// ── Connect gate (provider tabs + URL + token) ───────────────────
+function renderGateProvider() {
+  const def = providerDef(gateProvider);
+  providerTabs.querySelectorAll('.tab').forEach((t) => {
+    const on = t.dataset.provider === gateProvider;
+    t.classList.toggle('active', on);
+    t.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  orgUrlLabel.textContent = def.urlLabel || 'URL';
+  orgUrlInput.placeholder = def.urlPlaceholder || '';
+  orgUrlHint.textContent = def.urlHint || '';
+  patLabel.textContent = def.tokenLabel || 'Token';
+  patInput.placeholder = def.tokenPlaceholder || '';
+  patScopes.innerHTML = '';
+  (def.scopes || []).forEach((sc) => {
+    const chip = document.createElement('span');
+    chip.className = 'tag';
+    chip.textContent = sc;
+    patScopes.appendChild(chip);
+  });
+  const st = connStatus.providers[gateProvider] || {};
+  orgUrlInput.value = st.url || '';
+  patInput.value = '';
+  if (st.rejected) {
+    setPatMsg(`Your saved ${def.label} token was rejected. Paste a new one to continue.`, 'error');
+  } else {
+    setPatMsg('');
+  }
+  // A Back button only makes sense when there is somewhere to go back to.
+  patCancel.classList.toggle('hidden', !connStatus.hasConnection);
+}
+
+function openGate(providerId) {
+  if (providerId) gateProvider = providerId;
+  renderGateProvider();
+  showView(patSetup);
+  setTimeout(() => (orgUrlInput.value ? patInput : orgUrlInput).focus(), 30);
+}
+
+providerTabs.addEventListener('click', (e) => {
+  const tab = e.target.closest('.tab');
+  if (!tab) return;
+  gateProvider = tab.dataset.provider;
+  renderGateProvider();
+});
+
+patCancel.addEventListener('click', () => {
+  if (connStatus.hasConnection) showView(prListView);
+});
+
 patSubmit.addEventListener('click', async () => {
-  const pat = patInput.value.trim();
-  const orgUrl = orgUrlInput.value.trim();
-  if (!pat || !orgUrl) { setPatMsg('Please fill in both fields.', 'error'); return; }
+  const token = patInput.value.trim();
+  const url = orgUrlInput.value.trim();
+  if (!token || !url) { setPatMsg('Please fill in both fields.', 'error'); return; }
 
   patSubmit.disabled = true;
   patSubmit.textContent = 'Validating…';
   setPatMsg('');
 
-  const result = await window.lgtm.validatePat(pat, orgUrl);
+  const result = await window.lgtm.connectProvider({ providerId: gateProvider, token, url });
   if (result.success) {
-    // The PAT works; whether it was saved is a separate answer. A refusing
-    // OS keychain means the PAT is in memory for this session only, and
+    // The token works; whether it was saved is a separate answer. A refusing
+    // OS keychain means the token is in memory for this session only, and
     // the user needs to know that before they wonder why it asks again.
     if (result.storage && !result.storage.ok) {
-      alert(`Connected, but the PAT was not saved: ${result.storage.error}`);
+      alert(`Connected, but the token was not saved: ${result.storage.error}`);
     }
-    // Load agents + settings BEFORE switching views — the toolbar
-    // agent dropdown, per-tab agent dropdowns, repo config buttons,
-    // and starred-repo state all render against the `agents` /
-    // `repoConfigs` / `starredRepos` globals that this populates.
-    // It's two fast IPC calls (<100ms), no network — safe to await.
+    connStatus = result.status || connStatus;
+    activeProvider = gateProvider;
+    // Load agents + settings BEFORE switching views — the toolbar agent
+    // dropdown, per-tab agent dropdowns, repo config buttons, and
+    // starred-repo state all render against the globals this populates.
     try {
       await loadAgents();
     } catch (err) {
       console.warn('[LGTM] loadAgents failed:', err.message);
     }
-
+    renderProviderSelect();
+    applyActiveProvider();
     showView(prListView);
-    subtitleEl.textContent = orgUrl.replace('https://dev.azure.com/', '');
     setPatMsg('');
-
-    if (!bugsLoaded) {
-      bugsLoaded = true;
-      window.lgtm.refreshBugs(bugsFilters).then((r) => {
-        if (r && r.success) renderBugList(r.bugs);
-      }).catch(() => {});
-    }
-    if (!ticketsLoaded) {
-      ticketsLoaded = true;
-      window.lgtm.refreshWorkItems(ticketsFilters).then((r) => {
-        if (r && r.success) renderTicketList(r.items);
-      }).catch(() => {});
-    }
+    patInput.value = '';
   } else {
     setPatMsg(result.error, 'error');
   }
   patSubmit.disabled = false;
   patSubmit.textContent = 'Validate & Connect';
 });
+
+// ── Provider switcher (the top-level filter) ────────────────────
+function renderProviderSelect() {
+  if (!providerSelect) return;
+  providerSelect.innerHTML = '';
+  const connected = connectedProviderIds();
+  for (const p of providers) {
+    const opt = document.createElement('option');
+    const on = connected.includes(p.id);
+    opt.value = on ? p.id : `connect:${p.id}`;
+    const st = connStatus.providers[p.id] || {};
+    opt.textContent = on ? `${p.label}${st.display ? ` · ${st.display}` : ''}` : `Connect ${p.label}…`;
+    if (on && p.id === activeProvider) opt.selected = true;
+    providerSelect.appendChild(opt);
+  }
+}
+
+providerSelect && providerSelect.addEventListener('change', async () => {
+  const v = providerSelect.value;
+  if (v.startsWith('connect:')) {
+    renderProviderSelect();             // snap the select back to the active one
+    openGate(v.slice('connect:'.length));
+    return;
+  }
+  if (v === activeProvider) return;
+  activeProvider = v;
+  await window.lgtm.setActiveProvider(v);
+  applyActiveProvider();
+});
+
+/**
+ * Re-render everything that depends on which service is active: subtitle,
+ * hint nouns, the three lists (from cache, then refreshed if never loaded),
+ * and the current-user used for "my PRs".
+ */
+function applyActiveProvider() {
+  const st = connStatus.providers[activeProvider] || {};
+  const def = providerDef();
+  subtitleEl.textContent = st.display ? `${def.short || def.label} · ${st.display}` : '';
+  currentUser = usersByProvider[activeProvider] || null;
+  updateFilterHints();
+  if (prsByProvider[activeProvider] === undefined) {
+    // Nothing cached yet: show the loading row and fetch, instead of waiting
+    // for the next poll event (the first one can fire before the page loads).
+    prListEl.classList.remove('hidden');
+    noPrsEl.classList.add('hidden');
+    prListEl.innerHTML = '<div class="loading">Loading PRs…</div>';
+    currentPrs = [];
+    const providerId = activeProvider;
+    window.lgtm.refreshPrs({ provider: providerId }).then((r) => {
+      if (!r || !r.success) {
+        if (providerId === activeProvider && prsByProvider[providerId] === undefined) {
+          prListEl.innerHTML = `<div class="loading">Failed to load PRs: ${esc((r && r.error) || '')}</div>`;
+        }
+        return;
+      }
+      prsByProvider[providerId] = r.prs;
+      if (providerId === activeProvider) renderPrList(r.prs);
+    }).catch(() => {});
+  } else {
+    renderPrList(prsByProvider[activeProvider]);
+  }
+  const loaded = loadedByProvider[activeProvider] || {};
+  if (loaded.bugs) renderBugList(bugsByProvider[activeProvider] || []);
+  else if (activeTab === 'bugs') refreshBugs();
+  else { bugListEl.innerHTML = '<div class="loading">Loading bugs…</div>'; noBugsEl.classList.add('hidden'); bugsTabCount.classList.add('hidden'); currentBugs = []; }
+  if (loaded.tickets) renderTicketList(ticketsByProvider[activeProvider] || []);
+  else if (activeTab === 'tickets') refreshTickets();
+  else { ticketListEl.innerHTML = '<div class="loading">Loading tickets…</div>'; noTicketsEl.classList.add('hidden'); ticketsTabCount.classList.add('hidden'); currentTickets = []; }
+  if (!loaded.bugs || !loaded.tickets) prefetchWorkItems(activeProvider);
+}
+
+/** Warm the bugs/tickets caches for a provider in the background. */
+function prefetchWorkItems(providerId) {
+  const loaded = loadedByProvider[providerId] || (loadedByProvider[providerId] = {});
+  if (!loaded.bugs) {
+    loaded.bugs = true;
+    window.lgtm.refreshBugs({ ...bugsFilters, provider: providerId }).then((r) => {
+      if (r && r.success) { bugsByProvider[providerId] = r.bugs; if (providerId === activeProvider) renderBugList(r.bugs); }
+      else loaded.bugs = false;
+    }).catch(() => { loaded.bugs = false; });
+  }
+  if (!loaded.tickets) {
+    loaded.tickets = true;
+    window.lgtm.refreshWorkItems({ ...ticketsFilters, provider: providerId }).then((r) => {
+      if (r && r.success) { ticketsByProvider[providerId] = r.items; if (providerId === activeProvider) renderTicketList(r.items); }
+      else loaded.tickets = false;
+    }).catch(() => { loaded.tickets = false; });
+  }
+}
 
 function setPatMsg(msg, type = '') {
   patStatusMsg.className = 'status-msg ' + type;
@@ -410,7 +573,8 @@ let collapsedRepos = {};  // repoKey → boolean (true = collapsed)
 let openConfigPopover = null; // currently open popover element
 
 function renderPrList(prs) {
-  currentPrs = prs;
+  currentPrs = prs || [];
+  prs = currentPrs;
   prListEl.innerHTML = '';
 
   // Track known repos for settings
@@ -534,7 +698,7 @@ function renderPrList(prs) {
         info.className = 'pr-info';
         const showRunning = reviewStatus === 'running' || reviewStatus === 'cloning';
         info.innerHTML = `
-          <div class="pr-path"><a class="pr-title-link" href="#" title="Open PR in browser">#${pr.id} ${esc(pr.title)}</a></div>
+          <div class="pr-path"><a class="pr-title-link" href="#" title="Open PR in browser"><span class="pr-number">${pr.provider === 'github' ? '#' : '!'}${pr.id}</span>${esc(pr.title)}</a></div>
           <div class="pr-title">by ${esc(pr.createdBy)} · ${ageStr}</div>
           ${showRunning ? `<div class="pr-running-line" data-running-key="${esc(key)}">${esc(statusLineFor(key))}</div>` : ''}
         `;
@@ -640,7 +804,7 @@ function renderPrList(prs) {
           // Reveal state: Play + dismiss
           // Effective action: 'approved' falls back to the author-based
           // default, matching what startReview() will dispatch.
-          const mode = actionModeFor(pr, prModeOverrides, currentUser);
+          const mode = actionModeFor(pr, prModeOverrides, userForPr(pr));
           const playBtn = document.createElement('button');
           playBtn.className = 'btn-play-row';
           playBtn.textContent = '▶';  // ▶
@@ -881,7 +1045,7 @@ async function startReview(pr) {
   const model = agentModels[agentId] || null;
   // 'approved' is informational — pressing play falls back to the
   // author-based default action so the agent has something to do.
-  const mode = actionModeFor(pr, prModeOverrides, currentUser);
+  const mode = actionModeFor(pr, prModeOverrides, userForPr(pr));
 
   // Optimistically show cloning state
   reviewStatuses[key] = { status: 'cloning', agentId, output: '' };
@@ -1092,9 +1256,9 @@ function renderReportCard(detail) {
     html += stat('Tests modified', report.tests_modified);
     html += '</div>';
     if (report.pr_id && report.pr_url) {
-      html += `<a class="report-link" data-href="${escHtml(report.pr_url)}">→ Open PR !${report.pr_id}</a>`;
+      html += `<a class="report-link" data-href="${escHtml(report.pr_url)}">→ Open PR ${detail.provider === 'github' ? '#' : '!'}${report.pr_id}</a>`;
     } else if (report.branch_name) {
-      html += `<div style="font-size:11px;color:var(--text-dim);margin-top:4px">Branch: <code>${escHtml(report.branch_name)}</code></div>`;
+      html += `<div class="report-branch">Branch: <code>${escHtml(report.branch_name)}</code></div>`;
     }
   } else {
     html += '</div>';
@@ -1136,6 +1300,9 @@ function renderPromptPanel(detail) {
 function updateActionButtons(detail) {
   const status = detail ? detail.status : null;
   rdOpenAdoBtn.disabled = !(detail && detail.pr && detail.pr.webUrl);
+  const prov = providerDef((detail && (detail.provider || (detail.pr && detail.pr.provider))) || activeProvider);
+  rdOpenAdoBtn.textContent = prov.openLabel || 'Open in browser';
+  rdOpenAdoBtn.title = prov.openLabel || 'Open in browser';
   rdCopyBtn.disabled = !(detail && detail.output);
   rdSaveBtn.disabled = !(detail && detail.output);
   // Reveal clone: only meaningful while we have a clone path on disk
@@ -1396,14 +1563,12 @@ refreshBtn.addEventListener('click', async () => {
   refreshBtn.textContent = '⟳';
   try {
     if (activeTab === 'bugs') {
-      const result = await window.lgtm.refreshBugs(bugsFilters);
-      if (result.success) renderBugList(result.bugs);
+      await refreshBugs();
     } else if (activeTab === 'tickets') {
-      const result = await window.lgtm.refreshWorkItems(ticketsFilters);
-      if (result.success) renderTicketList(result.items);
+      await refreshTickets();
     } else {
-      const result = await window.lgtm.refreshPrs();
-      if (result.success) renderPrList(result.prs);
+      const result = await window.lgtm.refreshPrs({ provider: activeProvider });
+      if (result.success) { prsByProvider[result.provider || activeProvider] = result.prs; if ((result.provider || activeProvider) === activeProvider) renderPrList(result.prs); }
     }
   } finally {
     refreshBtn.disabled = false;
@@ -1427,14 +1592,9 @@ function setActiveTab(tab) {
     pane.classList.toggle('hidden', !active);
   });
 
-  if (tab === 'bugs' && !bugsLoaded) {
-    bugsLoaded = true;
-    refreshBugs();
-  }
-  if (tab === 'tickets' && !ticketsLoaded) {
-    ticketsLoaded = true;
-    refreshTickets();
-  }
+  const loaded = loadedByProvider[activeProvider] || {};
+  if (tab === 'bugs' && !loaded.bugs) refreshBugs();
+  if (tab === 'tickets' && !loaded.tickets) refreshTickets();
 }
 
 tabPrsBtn.addEventListener('click', () => setActiveTab('prs'));
@@ -1448,6 +1608,7 @@ tabTestBtn.addEventListener('click', () => {
 // ── Bugs: render & refresh ───────────────────────────────────────
 function renderBugList(bugs) {
   currentBugs = bugs || [];
+  bugsByProvider[activeProvider] = currentBugs;
   bugListEl.innerHTML = '';
 
   // Update tab count badge
@@ -1514,13 +1675,18 @@ function renderBugList(bugs) {
 }
 
 async function refreshBugs() {
+  const providerId = activeProvider;
   bugListEl.innerHTML = '<div class="loading">Loading bugs…</div>';
   noBugsEl.classList.add('hidden');
-  const result = await window.lgtm.refreshBugs(bugsFilters);
+  const loaded = loadedByProvider[providerId] || (loadedByProvider[providerId] = {});
+  loaded.bugs = true;
+  const result = await window.lgtm.refreshBugs({ ...bugsFilters, provider: providerId });
   if (result.success) {
-    renderBugList(result.bugs);
+    bugsByProvider[providerId] = result.bugs;
+    if (providerId === activeProvider) renderBugList(result.bugs);
   } else {
-    bugListEl.innerHTML = `<div class="loading">Failed to load bugs: ${esc(result.error || '')}</div>`;
+    loaded.bugs = false;
+    if (providerId === activeProvider) bugListEl.innerHTML = `<div class="loading">Failed to load bugs: ${esc(result.error || '')}</div>`;
   }
 }
 
@@ -1563,12 +1729,13 @@ function renderWorkItemRow(container, wi, typeLabel) {
   let meta = esc(wi.state || '');
   if (!wi.isBacklog && wi.iterationName) meta = `${esc(wi.iterationName)} · ${meta}`;
   if (wi.isBacklog) meta = `Backlog · ${meta}`;
+  if (wi.repo && wi.provider === 'github') meta = `${esc(wi.repo)} · ${meta}`;
 
   const info = document.createElement('div');
   info.className = 'pr-info';
   const showRunning = reviewStatus === 'running' || reviewStatus === 'cloning';
   info.innerHTML = `
-    <div class="pr-path"><a class="pr-title-link" href="#" title="Open work item in browser">#${wi.id} ${esc(wi.title)}</a></div>
+    <div class="pr-path"><a class="pr-title-link" href="#" title="Open work item in browser"><span class="pr-number">#${wi.id}</span>${esc(wi.title)}</a></div>
     <div class="pr-title">${meta}</div>
     ${showRunning && runtimeKey ? `<div class="pr-running-line" data-running-key="${esc(runtimeKey)}">${esc(statusLineFor(runtimeKey))}</div>` : ''}
   `;
@@ -1701,6 +1868,7 @@ function wiAsPr(wi) {
     project: wi.project,
     repo: '',
     webUrl: wi.webUrl,
+    provider: wi.provider || activeProvider,
   };
 }
 
@@ -1749,13 +1917,15 @@ async function openRepoPickerForWorkItem(wi, anchorEl, opts = {}) {
   openRepoPicker = popover;
   setTimeout(() => document.addEventListener('click', onOutsideRepoPickerClick), 10);
 
-  // Load repos (cache per session)
-  let repos = repoCache[wi.project];
+  // Load repos (cache per session, per provider)
+  const wiProvider = wi.provider || activeProvider;
+  const cacheKey = `${wiProvider}:${wi.project}`;
+  let repos = repoCache[cacheKey];
   if (!repos) {
-    const result = await window.lgtm.getReposForProject(wi.project);
+    const result = await window.lgtm.getReposForProject(wi.project, wiProvider);
     if (result && result.success) {
       repos = result.repos;
-      repoCache[wi.project] = repos;
+      repoCache[cacheKey] = repos;
     } else {
       loading.textContent = `Failed to load repos: ${result?.error || ''}`;
       return;
@@ -1779,7 +1949,9 @@ async function openRepoPickerForWorkItem(wi, anchorEl, opts = {}) {
     opt.textContent = r.name;
     select.appendChild(opt);
   });
-  const defaultRepo = lastUsedRepos[wi.project];
+  // A GitHub issue belongs to one repo, so that is the obvious default;
+  // otherwise the last repo used for this project.
+  const defaultRepo = (wi.repo && sorted.some((r) => r.name === wi.repo)) ? wi.repo : lastUsedRepos[wi.project];
   if (defaultRepo && sorted.some((r) => r.name === defaultRepo)) {
     select.value = defaultRepo;
   }
@@ -1802,7 +1974,8 @@ async function openRepoPickerForWorkItem(wi, anchorEl, opts = {}) {
   goBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
     const repoName = select.value;
-    const repoInfo = { project: wi.project, repo: repoName };
+    const picked = sorted.find((r) => r.name === repoName) || {};
+    const repoInfo = { project: wi.project, repo: repoName, repoId: picked.id || null, provider: wiProvider };
 
     // Tab-specific agent/model and per-repo prompt file.
     const isBugs = activeTab === 'bugs';
@@ -1888,6 +2061,7 @@ function closeRepoPicker() {
 // ── Tickets (non-bug work items) ─────────────────────────────────
 function renderTicketList(items) {
   currentTickets = items || [];
+  ticketsByProvider[activeProvider] = currentTickets;
   ticketListEl.innerHTML = '';
 
   if (currentTickets.length > 0) {
@@ -1976,13 +2150,18 @@ function typeClassFor(type) {
 }
 
 async function refreshTickets() {
+  const providerId = activeProvider;
   ticketListEl.innerHTML = '<div class="loading">Loading tickets…</div>';
   noTicketsEl.classList.add('hidden');
-  const result = await window.lgtm.refreshWorkItems(ticketsFilters);
+  const loaded = loadedByProvider[providerId] || (loadedByProvider[providerId] = {});
+  loaded.tickets = true;
+  const result = await window.lgtm.refreshWorkItems({ ...ticketsFilters, provider: providerId });
   if (result.success) {
-    renderTicketList(result.items);
+    ticketsByProvider[providerId] = result.items;
+    if (providerId === activeProvider) renderTicketList(result.items);
   } else {
-    ticketListEl.innerHTML = `<div class="loading">Failed to load tickets: ${esc(result.error || '')}</div>`;
+    loaded.tickets = false;
+    if (providerId === activeProvider) ticketListEl.innerHTML = `<div class="loading">Failed to load tickets: ${esc(result.error || '')}</div>`;
   }
 }
 
@@ -2001,8 +2180,87 @@ settingsBtn.addEventListener('click', async () => {
   showView(settingsView);
 });
 
+function renderConnections() {
+  if (!connectionList) return;
+  connectionList.innerHTML = '';
+  for (const p of providers) {
+    const st = connStatus.providers[p.id] || {};
+    const row = document.createElement('div');
+    row.className = `connection-row${st.connected ? ' on' : ''}`;
+
+    const tile = document.createElement('span');
+    tile.className = 'tile';
+    tile.textContent = p.glyph || p.short || p.label.slice(0, 2).toUpperCase();
+
+    const info = document.createElement('div');
+    info.className = 'info';
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = p.label;
+    const where = document.createElement('span');
+    where.className = 'where';
+    where.textContent = st.connected
+      ? `${st.display || st.url}${st.userLabel ? ` · ${st.userLabel}` : ''}`
+      : (st.rejected ? 'token rejected — reconnect' : 'not connected');
+    info.appendChild(name);
+    info.appendChild(where);
+
+    row.appendChild(tile);
+    row.appendChild(info);
+
+    if (st.connected) {
+      const btn = document.createElement('button');
+      btn.className = 'btn-danger-outline';
+      btn.textContent = 'Disconnect';
+      btn.title = `Remove the ${p.label} token from secure storage`;
+      btn.addEventListener('click', () => disconnectProvider(p.id));
+      row.appendChild(btn);
+    } else {
+      const btn = document.createElement('button');
+      btn.className = 'btn-outline';
+      btn.textContent = 'Connect';
+      btn.addEventListener('click', () => openGate(p.id));
+      row.appendChild(btn);
+    }
+    connectionList.appendChild(row);
+  }
+}
+
+async function disconnectProvider(providerId) {
+  const def = providerDef(providerId);
+  if (!confirm(`Disconnect ${def.label} and remove its token from secure storage?`)) return;
+  const result = await window.lgtm.disconnectProvider(providerId);
+  connStatus = (result && result.status) || connStatus;
+  // Drop everything cached for that service.
+  delete prsByProvider[providerId];
+  delete bugsByProvider[providerId];
+  delete ticketsByProvider[providerId];
+  delete usersByProvider[providerId];
+  delete loadedByProvider[providerId];
+  for (const k of Object.keys(reviewStatuses)) {
+    const r = reviewStatuses[k];
+    if (r && r.pr && (r.pr.provider || 'azure-devops') === providerId) delete reviewStatuses[k];
+  }
+  knownRepos.clear();
+  collapsedBugProjects = {};
+  collapsedTicketProjects = {};
+  renderConnections();
+  if (!connStatus.hasConnection) {
+    setActiveTab('prs');
+    activeProvider = '';
+    subtitleEl.textContent = '';
+    openGate(providerId);
+    return;
+  }
+  activeProvider = connStatus.activeProvider;
+  renderProviderSelect();
+  applyActiveProvider();
+}
+
 async function populateSettings() {
   const s = await window.lgtm.getSettings();
+  connStatus = await window.lgtm.getConnectionStatus().catch(() => connStatus);
+  renderConnections();
   sPromptPath.value = s.promptPath || '';
   sWebhookPort.value = s.webhookPort || 3847;
   sPollInterval.value = Math.round((s.pollingIntervalMs || 60000) / 1000);
@@ -2084,7 +2342,7 @@ const repoFileTreeCache = {};
 async function fetchRepoFileTree(repoKey) {
   if (repoFileTreeCache[repoKey]) return repoFileTreeCache[repoKey];
   const [project, repoName] = repoKey.split('/');
-  const result = await window.lgtm.getRepoFileTree(project, repoName);
+  const result = await window.lgtm.getRepoFileTree(project, repoName, activeProvider);
   if (result.success) {
     repoFileTreeCache[repoKey] = result.files;
     return result.files;
@@ -2466,16 +2724,17 @@ async function fetchAllProjectsWithRepos() {
   currentPrs.forEach((pr) => projectNames.add(pr.project));
   currentBugs.forEach((b) => projectNames.add(b.project));
   currentTickets.forEach((t) => projectNames.add(t.project));
-  Object.keys(repoCache).forEach((p) => projectNames.add(p));
+  Object.keys(repoCache).forEach((k) => { if (k.startsWith(`${activeProvider}:`)) projectNames.add(k.slice(activeProvider.length + 1)); });
 
   const results = [];
   for (const name of Array.from(projectNames).sort()) {
-    let repos = repoCache[name];
+    const cacheKey = `${activeProvider}:${name}`;
+    let repos = repoCache[cacheKey];
     if (!repos) {
-      const r = await window.lgtm.getReposForProject(name);
+      const r = await window.lgtm.getReposForProject(name, activeProvider);
       if (r && r.success) {
         repos = r.repos;
-        repoCache[name] = repos;
+        repoCache[cacheKey] = repos;
       } else {
         repos = [];
       }
@@ -2526,28 +2785,25 @@ async function saveTabSettings(kind) {
   }
 }
 
-disconnectBtn.addEventListener('click', async () => {
-  if (confirm('Disconnect and remove your PAT from secure storage?')) {
-    await window.lgtm.clearPat();
-    reviewStatuses = {};
-    knownRepos.clear();
-    currentBugs = [];
-    bugsLoaded = false;
-    bugsTabCount.classList.add('hidden');
-    currentTickets = [];
-    ticketsLoaded = false;
-    ticketsTabCount.classList.add('hidden');
-    collapsedBugProjects = {};
-    collapsedTicketProjects = {};
-    setActiveTab('prs');
-    showView(patSetup);
-    subtitleEl.textContent = '';
-  }
+settingsBack && settingsBack.addEventListener('click', () => {
+  if (connStatus.hasConnection) showView(prListView);
+  else openGate();
 });
 
 // ── IPC listeners ────────────────────────────────────────────────
-window.lgtm.onPrList((prs) => renderPrList(prs));
-window.lgtm.onPrError((msg) => console.error('[LGTM] PR fetch error:', msg));
+window.lgtm.onPrList((data) => {
+  // Older main builds sent a bare array; the current one sends { provider, prs }.
+  const provider = Array.isArray(data) ? activeProvider : data.provider;
+  const prs = Array.isArray(data) ? data : data.prs;
+  prsByProvider[provider] = prs;
+  if (provider === activeProvider) renderPrList(prs);
+});
+window.lgtm.onPrError((data) => console.error('[LGTM] PR fetch error:', data && data.provider, data && (data.message || data)));
+window.lgtm.onConnectionStatus((status) => {
+  connStatus = status;
+  renderProviderSelect();
+  if (connectionList && !settingsView.classList.contains('hidden')) renderConnections();
+});
 
 // Background model discovery completed — overlay the freshly
 // discovered models on top of the hardcoded fallback so the toolbar
@@ -2561,59 +2817,65 @@ window.lgtm.onAgentsUpdated((updated) => {
   if (typeof populateTestAgentSelect === 'function') populateTestAgentSelect();
 });
 
-window.lgtm.onCurrentUser((u) => {
-  currentUser = u;
-  if (currentPrs.length) renderPrList(currentPrs);
+window.lgtm.onCurrentUser((data) => {
+  const provider = data && data.provider ? data.provider : activeProvider;
+  const u = data && data.user !== undefined ? data.user : data;
+  usersByProvider[provider] = u;
+  if (provider === activeProvider) {
+    currentUser = u;
+    if (currentPrs.length) renderPrList(currentPrs);
+  }
 });
 
-// Pull initial PAT status on renderer boot. Pull (vs main pushing
-// `pat-status`) is race-proof: the renderer asks when it's ready,
-// instead of main hoping `did-finish-load` hasn't fired yet.
-async function bootFromPatStatus() {
-  let status;
+// Pull initial connection status on renderer boot. Pull (vs main pushing)
+// is race-proof: the renderer asks when it's ready, instead of main hoping
+// `did-finish-load` hasn't fired yet.
+async function bootFromConnectionStatus() {
   try {
-    status = await window.lgtm.getPatStatus();
+    providers = await window.lgtm.getProviders();
   } catch (err) {
-    console.warn('[LGTM] getPatStatus failed:', err.message);
-    showView(patSetup);
-    return;
+    console.warn('[LGTM] getProviders failed:', err.message);
+    providers = [];
   }
-
-  if (!status || !status.hasPat) {
-    // Pre-fill the org URL we already had on file so the user only
-    // has to paste a new PAT, and tell them why they're back here
-    // if main validated and rejected the cached PAT.
-    if (status && status.orgUrl) orgUrlInput.value = status.orgUrl;
-    if (status && status.patExpired) {
-      setPatMsg('Your saved PAT was rejected by Azure DevOps. Paste a new one to continue.', 'error');
-      patInput.focus();
-    }
-    showView(patSetup);
-    return;
-  }
-
-  try { await loadAgents(); } catch (err) { console.warn('[LGTM] loadAgents:', err.message); }
   try {
-    const u = await window.lgtm.getMe();
-    if (u) currentUser = u;
-  } catch { /* ignore */ }
-  if (status.storageWarning) console.warn('[LGTM] PAT storage:', status.storageWarning);
-  showView(prListView);
-  subtitleEl.textContent = (status.orgUrl || '').replace('https://dev.azure.com/', '');
-  if (!bugsLoaded) {
-    bugsLoaded = true;
-    window.lgtm.refreshBugs(bugsFilters).then((result) => {
-      if (result && result.success) renderBugList(result.bugs);
-    }).catch(() => {});
+    connStatus = await window.lgtm.getConnectionStatus();
+  } catch (err) {
+    console.warn('[LGTM] getConnectionStatus failed:', err.message);
+    openGate('azure-devops');
+    return;
   }
-  if (!ticketsLoaded) {
-    ticketsLoaded = true;
-    window.lgtm.refreshWorkItems(ticketsFilters).then((result) => {
-      if (result && result.success) renderTicketList(result.items);
-    }).catch(() => {});
+
+  if (!connStatus || !connStatus.hasConnection) {
+    // Land on whichever provider has a stored URL (its token was rejected
+    // or never saved) so the user only has to paste a token.
+    const rejected = Object.values(connStatus.providers || {}).find((p) => p.rejected);
+    const withUrl = Object.values(connStatus.providers || {}).find((p) => p.url);
+    openGate((rejected || withUrl || {}).providerId || 'azure-devops');
+    return;
+  }
+
+  activeProvider = connStatus.activeProvider;
+  for (const p of Object.values(connStatus.providers || {})) {
+    if (p.storageWarning) console.warn(`[LGTM] ${p.label} token storage: ${p.storageWarning}`);
+  }
+  try { await loadAgents(); } catch (err) { console.warn('[LGTM] loadAgents:', err.message); }
+  for (const id of connectedProviderIds()) {
+    try {
+      const u = await window.lgtm.getMe(id);
+      if (u) usersByProvider[id] = u;
+    } catch { /* ignore */ }
+  }
+  renderProviderSelect();
+  showView(prListView);
+  applyActiveProvider();
+  // Warm the other connected services too so the switch is instant.
+  for (const id of connectedProviderIds()) {
+    if (id === activeProvider) continue;
+    window.lgtm.refreshPrs({ provider: id }).then((r) => { if (r && r.success) prsByProvider[id] = r.prs; }).catch(() => {});
+    prefetchWorkItems(id);
   }
 }
-bootFromPatStatus();
+bootFromConnectionStatus();
 
 window.lgtm.onReviewUpdate((data) => {
   if (!reviewStatuses[data.key]) reviewStatuses[data.key] = { output: '' };
@@ -2704,14 +2966,23 @@ window.lgtm.onUpdateNotAvailable(() => {
   updateState = 'idle';
 });
 
+const updateProgress = document.getElementById('update-progress');
 window.lgtm.onUpdateDownloadProgress((progress) => {
-  updateMessage.innerHTML = `Downloading update… <span class="progress-text">${progress.percent}%</span>`;
+  const pct = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+  updateMessage.innerHTML = `Downloading update… <span class="progress-text">${pct}%</span>`;
+  if (updateProgress) {
+    updateProgress.classList.remove('hidden');
+    updateProgress.setAttribute('aria-valuenow', String(pct));
+    updateProgress.firstElementChild.style.width = `${pct}%`;
+  }
 });
 
 window.lgtm.onUpdateDownloaded(() => {
   updateState = 'ready';
   updateMessage.textContent = 'Update ready!';
   updateActionBtn.textContent = 'Restart';
+  updateActionBtn.disabled = false;
+  if (updateProgress) updateProgress.classList.add('hidden');
 });
 
 updateActionBtn.addEventListener('click', () => {
@@ -3087,7 +3358,7 @@ async function openAgentDetail(target) {
 
   // Header context
   if (target && target.kind === 'pr' && target.pr) {
-    adTitle.textContent = `!${target.pr.id} ${target.pr.title || ''}`;
+    adTitle.textContent = `${target.pr.provider === 'github' ? '#' : '!'}${target.pr.id} ${target.pr.title || ''}`;
     adMeta.textContent = `${target.pr.project} / ${target.pr.repo}`;
   } else {
     adTitle.textContent = 'Agent detail';

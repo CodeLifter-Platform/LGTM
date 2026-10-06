@@ -1,15 +1,17 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-density="compact">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LGTM</title>
+  <link rel="stylesheet" href="tokens.css">
   <link rel="stylesheet" href="styles.css">
   <script>
-    // Apply persisted theme before body renders to avoid a flash.
+    // Apply the persisted theme before body renders to avoid a flash.
+    // Dark is canonical; light is the design system's [data-theme="light"] scope.
     try {
       if (localStorage.getItem('lgtm-theme') === 'light') {
-        document.documentElement.classList.add('light');
+        document.documentElement.setAttribute('data-theme', 'light');
       }
     } catch (e) { /* ignore */ }
   </script>
@@ -17,45 +19,43 @@
 <body>
   <!-- ─── Draggable title bar ─────────────────────────────── -->
   <header id="titlebar">
-    <svg class="logo-icon" viewBox="0 0 1024 1024" width="20" height="20">
-      <defs>
-        <linearGradient id="hdr-bg" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stop-color="#7B2FBE"/>
-          <stop offset="50%" stop-color="#5B4FD6"/>
-          <stop offset="100%" stop-color="#3A8BF5"/>
-        </linearGradient>
-      </defs>
-      <rect width="1024" height="1024" rx="220" ry="220" fill="url(#hdr-bg)"/>
-      <path d="M240 260h544q60 0 60 60v300q0 60-60 60h-340l-100 100v-100h-104q-60 0-60-60v-300q0-60 60-60Z" fill="white" opacity="0.95"/>
-      <polyline points="370,460 470,560 654,376" fill="none" stroke="url(#hdr-bg)" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>
+    <img class="logo-icon" src="../assets/lgtm-mark.svg" alt="" width="20" height="20">
     <span class="logo">LGTM</span>
     <span class="subtitle" id="subtitle"></span>
     <button id="theme-toggle" class="btn-theme-toggle" title="Toggle light/dark">&#9790;</button>
   </header>
 
-  <!-- ─── Update banner ───────────────────────────────────── -->
-  <div id="update-banner" class="update-banner hidden">
+  <!-- ─── Update banner (Toast) ───────────────────────────── -->
+  <div id="update-banner" class="update-banner hidden" role="status">
     <span id="update-message">A new version is available!</span>
+    <div id="update-progress" class="progress hidden" role="progressbar" aria-valuemin="0" aria-valuemax="100"><span style="width:0%"></span></div>
     <div class="update-actions">
       <button id="update-action-btn" class="btn-update">Download</button>
-      <button id="update-dismiss-btn" class="btn-update-dismiss">&times;</button>
+      <button id="update-dismiss-btn" class="btn-update-dismiss" title="Dismiss">&times;</button>
     </div>
   </div>
 
-  <!-- ─── PAT Setup (first-run gate) ─────────────────────── -->
-  <section id="pat-setup" class="view">
+  <!-- ─── Connect gate (first run, or adding a second service) ── -->
+  <section id="pat-setup" class="view gate">
     <div class="card">
-      <h2>Connect to Azure DevOps</h2>
-      <p class="hint">Enter your organization URL and Personal Access Token. The PAT needs <strong>Code (Read)</strong> scope at minimum.</p>
+      <h2>Connect a git service</h2>
+      <p class="lede">LGTM lists your open pull requests and work items from the services you connect, and runs an agent against them. Tokens go to the OS keychain, never to the config file.</p>
 
-      <label for="org-url">Organization URL</label>
-      <input type="url" id="org-url" placeholder="https://dev.azure.com/myorg or https://myorg.visualstudio.com/project" spellcheck="false">
+      <div class="tab-strip provider-tabs" role="tablist" id="provider-tabs">
+        <button class="tab active" role="tab" data-provider="azure-devops" aria-selected="true"><span class="g">AZ</span> Azure DevOps</button>
+        <button class="tab" role="tab" data-provider="github" aria-selected="false"><span class="g">GH</span> GitHub</button>
+      </div>
 
-      <label for="pat-input">Personal Access Token</label>
-      <input type="password" id="pat-input" placeholder="paste your PAT here" spellcheck="false">
+      <label for="org-url" id="org-url-label">Organization URL</label>
+      <input type="url" id="org-url" placeholder="https://dev.azure.com/myorg or https://myorg.visualstudio.com/project" spellcheck="false" autocomplete="off">
+      <p class="hint" id="org-url-hint"></p>
+
+      <label for="pat-input" id="pat-label">Personal Access Token</label>
+      <input type="password" id="pat-input" placeholder="paste your PAT here" spellcheck="false" autocomplete="off">
+      <div class="scopes" id="pat-scopes"></div>
 
       <button id="pat-submit" class="btn-primary">Validate &amp; Connect</button>
+      <button id="pat-cancel" class="btn-secondary hidden" style="width:100%;margin-top:8px">Back</button>
 
       <div id="pat-status-msg" class="status-msg"></div>
     </div>
@@ -63,8 +63,9 @@
 
   <!-- ─── Main view: PRs + Bugs tabs ──────────────────────── -->
   <section id="pr-list-view" class="view hidden">
-    <!-- Global toolbar: applies to all tabs -->
+    <!-- Global toolbar: provider filter + agent + actions, applies to all tabs -->
     <div class="toolbar">
+      <select id="provider-select" class="agent-select provider-select" title="Which service to show"></select>
       <select id="agent-select" class="agent-select" title="Select review agent"></select>
       <button id="auto-review-btn" class="btn-auto-review" title="Auto-review all PRs (starred repos first)">&#9654;</button>
       <button id="refresh-btn" class="btn-icon" title="Refresh">↻</button>
@@ -147,7 +148,6 @@
 
     <!-- Tab pane: Test (chat-like agent sandbox) -->
     <div id="tab-pane-test" class="tab-pane hidden">
-      <!-- Top row: agent | model, 50/50 -->
       <div class="test-top-row">
         <select id="test-agent-select" class="agent-select test-top-select" title="Test agent"></select>
         <select id="test-model-select" class="agent-select test-top-select" title="Test model"></select>
@@ -164,7 +164,6 @@
         <div id="test-chat-messages" class="test-chat-messages hidden"></div>
       </div>
 
-      <!-- Composer: full-width textarea on top, two right-half buttons below -->
       <form id="test-input-form" class="test-input-form">
         <textarea
           id="test-input"
@@ -175,9 +174,7 @@
           disabled
         ></textarea>
         <div class="test-button-row">
-          <!-- Left half intentionally empty per design -->
           <div class="test-button-spacer"></div>
-          <!-- Right half: Start/Restart on the left, Submit on the right -->
           <div class="test-button-pair">
             <button type="button" id="test-start-btn" class="btn-secondary btn-test-half">Start</button>
             <button type="submit" id="test-send-btn" class="btn-primary btn-test-half" disabled>Submit</button>
@@ -201,7 +198,7 @@
     </div>
 
     <div class="review-detail-actions">
-      <button id="rd-open-ado" class="btn-detail-action" title="Open in Azure DevOps">Open in DevOps</button>
+      <button id="rd-open-ado" class="btn-detail-action" title="Open in browser">Open in browser</button>
       <button id="rd-open-clone" class="btn-detail-action hidden" title="Reveal cloned repo in file browser">Reveal clone</button>
       <button id="rd-copy" class="btn-detail-action" title="Copy log to clipboard">Copy log</button>
       <button id="rd-save" class="btn-detail-action" title="Save log to file">Save log</button>
@@ -212,9 +209,9 @@
     </div>
 
     <div id="rd-rerun-popover" class="rd-rerun-popover hidden">
-      <label>Agent</label>
+      <label for="rd-rerun-agent">Agent</label>
       <select id="rd-rerun-agent"></select>
-      <label>Model</label>
+      <label for="rd-rerun-model">Model</label>
       <select id="rd-rerun-model"></select>
       <div class="btn-row">
         <button id="rd-rerun-confirm" class="btn-primary">Re-run</button>
@@ -260,7 +257,6 @@
       </div>
     </div>
 
-    <!-- Top row: agent | model, 50/50 -->
     <div class="test-top-row">
       <select id="ad-agent-select" class="agent-select test-top-select" title="Agent"></select>
       <select id="ad-model-select" class="agent-select test-top-select" title="Model"></select>
@@ -286,7 +282,6 @@
       <div class="test-button-row">
         <div class="test-button-spacer"></div>
         <div class="test-button-pair">
-          <!-- No Restart per request — just Start, which becomes Submit/Stop after first run -->
           <div class="test-button-spacer"></div>
           <button type="submit" id="ad-send-btn" class="btn-primary btn-test-half" disabled>Start</button>
         </div>
@@ -297,6 +292,13 @@
   <!-- ─── Settings panel ──────────────────────────────────── -->
   <section id="settings-view" class="view hidden">
     <div class="settings-scroll">
+      <!-- ─── Connections ───────────────────────────────── -->
+      <div class="card">
+        <h2>Connections</h2>
+        <p class="hint">Each service has its own token in the OS keychain. The toolbar filter switches between the ones that are connected.</p>
+        <div id="connection-list" class="connection-list"></div>
+      </div>
+
       <div class="card">
         <h2>Settings</h2>
 
@@ -306,6 +308,7 @@
 
         <label for="s-webhook-port">Webhook port</label>
         <input type="number" id="s-webhook-port" value="3847">
+        <p class="hint">Azure DevOps service hooks and GitHub webhooks both POST to <code>/webhook</code> on this port.</p>
 
         <label for="s-poll-interval">Polling interval (seconds)</label>
         <input type="number" id="s-poll-interval" value="60" min="10">
@@ -332,7 +335,7 @@
 
       <div class="card">
         <div class="btn-row settings-action-row">
-          <button id="disconnect-btn" class="btn-danger">Disconnect &amp; Clear PAT</button>
+          <button id="settings-back" class="btn-secondary">Back</button>
           <button id="settings-save" class="btn-primary">Save</button>
         </div>
       </div>
@@ -359,8 +362,8 @@
 
       <div class="card">
         <div class="btn-row">
-          <button id="bugs-settings-save" class="btn-primary">Save</button>
           <button id="bugs-settings-back" class="btn-secondary">Back</button>
+          <button id="bugs-settings-save" class="btn-primary">Save</button>
         </div>
       </div>
     </div>
@@ -386,8 +389,8 @@
 
       <div class="card">
         <div class="btn-row">
-          <button id="tickets-settings-save" class="btn-primary">Save</button>
           <button id="tickets-settings-back" class="btn-secondary">Back</button>
+          <button id="tickets-settings-save" class="btn-primary">Save</button>
         </div>
       </div>
     </div>

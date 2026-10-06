@@ -83,14 +83,15 @@ test('Agents_crossing_IPC_lose_their_functions_and_keep_everything_else', () => 
   assert.ok(reg.getAll()[0].buildCmd, 'the registry itself keeps buildCmd');
 });
 
-test('The_spawn_environment_scrubs_debugger_variables_and_exposes_the_PAT_under_the_three_conventional_names', () => {
+test('The_spawn_environment_scrubs_debugger_variables_and_exposes_the_connection_token_under_its_conventional_names', () => {
   const saved = { ...process.env };
   try {
     process.env.NODE_OPTIONS = '--inspect';
     process.env.ELECTRON_RUN_AS_NODE = '1';
     process.env.NODE_INSPECT = '1';
     process.env.KEEP_ME = 'yes';
-    const env = buildSpawnEnv('tok');
+    // `agentEnv()` of an Azure DevOps connection: the token under the names its prompts reference.
+    const env = buildSpawnEnv({ AZURE_DEVOPS_PAT: 'tok', AZURE_DEVOPS_EXT_PAT: 'tok', SYSTEM_ACCESSTOKEN: 'tok' });
     assert.equal(env.NODE_OPTIONS, undefined);
     assert.equal(env.ELECTRON_RUN_AS_NODE, undefined);
     assert.equal(env.NODE_INSPECT, undefined);
@@ -100,6 +101,9 @@ test('The_spawn_environment_scrubs_debugger_variables_and_exposes_the_PAT_under_
     assert.equal(env.SYSTEM_ACCESSTOKEN, 'tok');
     const noPat = buildSpawnEnv(null);
     assert.equal(noPat.AZURE_DEVOPS_PAT, undefined);
+    const gh = buildSpawnEnv({ GITHUB_TOKEN: 'g', GH_TOKEN: 'g' });
+    assert.equal(gh.GITHUB_TOKEN, 'g');
+    assert.equal(gh.AZURE_DEVOPS_PAT, undefined, 'a GitHub connection hands over only its own token');
     assert.equal(process.env.NODE_OPTIONS, '--inspect', 'the real environment is untouched');
   } finally {
     for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];

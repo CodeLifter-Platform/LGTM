@@ -1,7 +1,7 @@
 {
   "name": "lgtm",
   "version": "0.5.58",
-  "description": "LGTM — Azure DevOps PR reviewer powered by Claude Code",
+  "description": "LGTM — pull request reviewer for Azure DevOps and GitHub, powered by Claude Code and friends",
   "main": "src/main/main.js",
   "scripts": {
     "start": "electron .",
@@ -69,6 +69,10 @@
         "to": "LGTM_REVIEW_PROMPT.md"
       },
       {
+        "from": "resources/LGTM_REVIEW_PROMPT.github.md",
+        "to": "LGTM_REVIEW_PROMPT.github.md"
+      },
+      {
         "from": "resources/REPO_REVIEW_TEMPLATE.md",
         "to": "REPO_REVIEW_TEMPLATE.md"
       },
@@ -80,7 +84,7 @@
     "linux": {
       "icon": "resources/icon.png",
       "category": "Development",
-      "synopsis": "Azure DevOps pull request reviewer",
+      "synopsis": "Pull request reviewer for Azure DevOps and GitHub",
       "artifactName": "LGTM-${arch}.${ext}",
       "target": [
         "AppImage",

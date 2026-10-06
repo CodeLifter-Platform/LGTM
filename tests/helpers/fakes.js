@@ -10,6 +10,8 @@
  *   FakeKeychain            keytar-shaped; can refuse or hang.
  *   MemoryStore             conf-shaped get/set/delete over a Map.
  *   ScriptedDevOpsClient    getAllOpenPRs/getMe scripted per call.
+ *   fakeConnection()        the shape AgentRunner/RepoCloner need from a
+ *                           providers.Connection, over a fake client.
  *   makeBareRepo()          a real bare git repo with two branches.
  *   collectNotify()         AgentRunner notify sink with waitFor helpers.
  *   fakeRegistry()          AgentRegistry stand-in pointing at fake-agent.js.
@@ -311,6 +313,31 @@ class ScriptedDevOpsClient {
   }
 }
 
+/**
+ * Enough of `providers.Connection` for AgentRunner and RepoCloner: provider
+ * id/label, the token, an authenticated clone URL, the agent env, the
+ * attachment hosts, and a client. Defaults to Azure DevOps shapes.
+ */
+function fakeConnection({ providerId = 'azure-devops', token = 'secret-pat', client = null, cloneUrl = null, user = null } = {}) {
+  const label = providerId === 'github' ? 'GitHub' : 'Azure DevOps';
+  const envNames = providerId === 'github' ? ['GITHUB_TOKEN', 'GH_TOKEN'] : ['AZURE_DEVOPS_PAT', 'AZURE_DEVOPS_EXT_PAT', 'SYSTEM_ACCESSTOKEN'];
+  return {
+    providerId,
+    provider: { id: providerId, label, universalPromptFile: providerId === 'github' ? 'LGTM_REVIEW_PROMPT.github.md' : 'LGTM_REVIEW_PROMPT.md' },
+    label,
+    token,
+    client,
+    user,
+    cloneUrl: cloneUrl || ((project, repo) => `https://pat:${token}@dev.azure.com/o/${project}/_git/${repo}`),
+    agentEnv() { const env = {}; for (const n of envNames) env[n] = token; return env; },
+    get attachmentHosts() {
+      const c = this.client;
+      if (c && Array.isArray(c.attachmentHosts)) return c.attachmentHosts;
+      return c && c.orgHost ? [c.orgHost] : [];
+    },
+  };
+}
+
 // ── git fixtures ──────────────────────────────────────────────────────
 
 function hasGit() {
@@ -430,6 +457,7 @@ module.exports = {
   FakeKeychain,
   MemoryStore,
   ScriptedDevOpsClient,
+  fakeConnection,
   hasGit,
   tempDir,
   makeBareRepo,

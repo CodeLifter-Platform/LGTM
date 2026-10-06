@@ -7,7 +7,7 @@
  * on stdin and printing a report). Everything between them is real:
  * DevOpsClient on the real SDK, RepoCloner on real git against a real
  * bare repo, PromptResolver, ScenarioPrompts from resources/prompts,
- * prompt-attachments, AgentRunner.
+ * prompt-attachments, the providers.Connection, AgentRunner.
  */
 const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -16,6 +16,7 @@ const path = require('node:path');
 const { AgentRunner } = require('../../src/main/agent-runner');
 const { DevOpsClient } = require('../../src/main/devops-client');
 const { RepoCloner } = require('../../src/main/repo-cloner');
+const { Connection } = require('../../src/main/providers');
 const { PromptResolver } = require('../../src/main/prompt-resolver');
 const { MemoryStore, startFakeAdo, adoPr, hasGit, makeBareRepo, tempDir, collectNotify, fakeRegistry, realScenarioPrompts } = require('../helpers/fakes');
 
@@ -49,7 +50,12 @@ test('A_PR_review_runs_end_to_end_cloning_then_running_then_completed_with_the_r
   console.log = () => {}; console.warn = () => {}; console.error = () => {};
   cleanups.push(() => { console.log = saveLog; console.warn = saveWarn; console.error = saveErr; });
 
-  const client = new DevOpsClient(PAT, ado.orgUrl);
+  // The shipped Connection: real DevOpsClient on the real SDK, the token
+  // handed to the agent through agentEnv(), the attachment host from the
+  // client. Only the clone URL is redirected at the local bare repo.
+  const conn = new Connection('azure-devops', PAT, ado.orgUrl);
+  assert.ok(conn.client instanceof DevOpsClient);
+  const client = conn.client;
   // The description's image URL points at this very server, whose port is
   // only known now: patch the placeholder as the PR body comes off the wire.
   const original = client.getPullRequest.bind(client);
@@ -59,7 +65,7 @@ test('A_PR_review_runs_end_to_end_cloning_then_running_then_completed_with_the_r
   };
 
   const tmp = tempDir('lgtm-canary-');
-  const cloner = new RepoCloner(PAT, ado.orgUrl, { cloneUrlFor: () => repo.url, tmpDir: tmp, log: () => {} });
+  const cloner = new RepoCloner({ token: PAT, cloneUrl: () => repo.url }, { tmpDir: tmp, log: () => {} });
   const config = new MemoryStore({ repoConfigs: {}, promptPath: '' });
   const notify = collectNotify();
   const registry = fakeRegistry({ mode: 'ok' });
@@ -69,11 +75,10 @@ test('A_PR_review_runs_end_to_end_cloning_then_running_then_completed_with_the_r
     scenarioPrompts: realScenarioPrompts(),
     promptResolver: new PromptResolver(config),
     createCloner: () => cloner,
-    createDevopsClient: () => client,
     cleanupDelayMs: 0,
   });
-  runner.setCredentials(PAT, ado.orgUrl);
-  runner.setIdentity(await client.getMe());
+  runner.setConnection(conn);
+  runner.setIdentity('azure-devops', await client.getMe());
 
   const prs = await client.getAllOpenPRs();
   assert.equal(prs.length, 1);
@@ -97,6 +102,10 @@ test('A_PR_review_runs_end_to_end_cloning_then_running_then_completed_with_the_r
   assert.match(prompt, /^SOURCE_BRANCH: feature\/x$/m);
   assert.match(prompt, /^TARGET_BRANCH: main$/m);
   assert.match(prompt, /^REVIEWER_IDENTITY: Test User \(user-1\)$/m);
+  assert.match(prompt, /^PROVIDER: Azure DevOps$/m);
+  assert.match(prompt, /^REPO_OWNER: Alpha$/m);
+  assert.match(prompt, /^REPO_NAME: web$/m);
+  assert.match(prompt, /^REPO_ID: r-web$/m);
   assert.match(prompt, new RegExp(`^REPO_PATH: ${detail.clonePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
   assert.ok(prompt.includes('## LGTM Project Rules'), 'universal rules from resources/');
   assert.ok(prompt.includes('## Project-Specific Rules\nRepo rule: be kind.'), 'the repo prompt discovered in the clone');

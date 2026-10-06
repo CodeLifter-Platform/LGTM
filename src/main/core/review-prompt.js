@@ -10,11 +10,15 @@ const { applySubstitutions } = require('../prompt-attachments');
 const THREAD_STATUS = { 1: 'Active', 2: 'Fixed', 3: 'WontFix', 4: 'Closed', 5: 'ByDesign', 6: 'Pending' };
 const THREAD_PREVIEW_CHARS = 200;
 
-/** "Display Name (id)" for the identity injected into a dispatched prompt. */
+/**
+ * "Display Name (id)" for the identity injected into a dispatched prompt.
+ * GitHub users carry a `login`, which the prompts reference as `@login`;
+ * Azure DevOps users carry an opaque `id`.
+ */
 function formatIdentity(user) {
   if (!user) return '';
   const name = user.displayName || user.email || '';
-  const id = user.id || '';
+  const id = user.login ? `@${user.login}` : (user.id || '');
   if (name && id) return `${name} (${id})`;
   return name || id || '';
 }
@@ -44,12 +48,15 @@ function summarizeThreads(reviewThreads) {
 
 /**
  * Plain-text block describing a work item for the implement-ticket
- * scenario. `imageSubs` swaps downloaded <img> tags for local markers
- * before the HTML is stripped.
+ * scenario. `imageSubs` swaps downloaded image references for local
+ * markers before the body is stripped. GitHub issue bodies are markdown
+ * already (`details.bodyFormat === 'markdown'`) and are passed through;
+ * Azure DevOps fields are HTML and get stripped.
  */
 function renderWorkItemDetails(details, repoInfo, imageSubs = null) {
   const subbed = (html) => (imageSubs ? applySubstitutions(html || '', imageSubs) : (html || ''));
-  const strip = (html) => htmlToText(subbed(html));
+  const isMarkdown = details.bodyFormat === 'markdown';
+  const strip = (html) => (isMarkdown ? subbed(html).trim() : htmlToText(subbed(html)));
 
   const parts = [
     `Project: ${details.project || repoInfo.project}`,

@@ -1,6 +1,6 @@
 /**
- * RepoCloner — Partial-clones Azure DevOps repos into temp directories
- * using the user's PAT for authentication.
+ * RepoCloner — Partial-clones repositories from a connected git service
+ * into temp directories, authenticating with that service's token.
  *
  * Every clone uses `--filter=blob:none --no-checkout` so blobs are fetched
  * on demand and the working tree is materialized only for the branch the
@@ -23,22 +23,30 @@ const fs = require('fs');
 const CLONE_TIMEOUT_MS = 120000;
 const FETCH_TIMEOUT_MS = 60000;
 
+// Temp-dir names must not carry path separators or shell-hostile characters.
+function safeName(s) {
+  return String(s || '').replace(/[^A-Za-z0-9._-]+/g, '_');
+}
+
 class RepoCloner {
   /**
-   * @param {string} pat    - Azure DevOps PAT
-   * @param {string} orgUrl - e.g. "https://dev.azure.com/myorg" or "https://myorg.visualstudio.com"
+   * @param {{ cloneUrl: function(project: string, repo: string): string, token?: string }} connection
+   *   Anything with a `cloneUrl(project, repo)` that returns an HTTPS URL with
+   *   the credential embedded (`providers.Connection` does; tests hand in a
+   *   stub pointing at a local bare repo). `token` is kept so the credential
+   *   can be redacted from every error message.
    * @param {object} [opts]
-   * @param {(project: string, repo: string) => string} [opts.cloneUrlFor] - override the clone URL
-   *   (tests point it at a local bare repo; the PAT-bearing URL is the default)
    * @param {string} [opts.tmpDir]           - where clones land (default os.tmpdir())
    * @param {number} [opts.cloneTimeoutMs]
    * @param {number} [opts.fetchTimeoutMs]
    * @param {(line: string) => void} [opts.log]
    */
-  constructor(pat, orgUrl, { cloneUrlFor, tmpDir, cloneTimeoutMs, fetchTimeoutMs, log } = {}) {
-    this.pat = pat;
-    this.orgUrl = orgUrl.replace(/\/+$/, '');
-    this._cloneUrlFor = cloneUrlFor || null;
+  constructor(connection, { tmpDir, cloneTimeoutMs, fetchTimeoutMs, log } = {}) {
+    if (!connection || typeof connection.cloneUrl !== 'function') {
+      throw new Error('RepoCloner needs a connection with cloneUrl(project, repo)');
+    }
+    this.connection = connection;
+    this.pat = connection.token || null;
     this.tmpDir = tmpDir || os.tmpdir();
     this.cloneTimeoutMs = cloneTimeoutMs || CLONE_TIMEOUT_MS;
     this.fetchTimeoutMs = fetchTimeoutMs || FETCH_TIMEOUT_MS;
@@ -61,29 +69,49 @@ class RepoCloner {
     const cloneUrl = this._buildCloneUrl(pr);
     const clonePath = path.join(
       this.tmpDir,
-      `lgtm-review-${pr.project}-${pr.repo}-${pr.id}-${Date.now()}`,
+      `lgtm-review-${safeName(pr.project)}-${safeName(pr.repo)}-${pr.id}-${Date.now()}`,
     );
 
     this.log(`[LGTM] Cloning ${pr.project}/${pr.repo} into ${clonePath}`);
     this.log(`[LGTM]   Source: ${sourceBranch}  Target: ${targetBranch}`);
 
     try {
-      await this._runGit(
-        ['clone', '--filter=blob:none', '--no-checkout', '--branch', sourceBranch, cloneUrl, clonePath],
-        { timeout: this.cloneTimeoutMs, onChild: opts.onChild },
-      );
+      if (pr.isFork && pr.headRepo) {
+        // The head lives in a fork (GitHub). Clone the base repo on the
+        // target branch, then fetch the fork's branch under the same local
+        // name so the rest of the flow is identical.
+        const [forkOwner, forkRepo] = String(pr.headRepo).split('/');
+        const forkUrl = this.connection.cloneUrl(forkOwner, forkRepo);
+        await this._runGit(
+          ['clone', '--filter=blob:none', '--no-checkout', '--branch', targetBranch, cloneUrl, clonePath],
+          { timeout: this.cloneTimeoutMs, onChild: opts.onChild },
+        );
+        await this._runGit(
+          ['fetch', forkUrl, `${sourceBranch}:${sourceBranch}`],
+          { cwd: clonePath, timeout: this.fetchTimeoutMs, onChild: opts.onChild },
+        );
+        await this._runGit(
+          ['checkout', sourceBranch],
+          { cwd: clonePath, timeout: this.cloneTimeoutMs, onChild: opts.onChild },
+        );
+      } else {
+        await this._runGit(
+          ['clone', '--filter=blob:none', '--no-checkout', '--branch', sourceBranch, cloneUrl, clonePath],
+          { timeout: this.cloneTimeoutMs, onChild: opts.onChild },
+        );
 
-      // Materialize the source branch working tree.
-      await this._runGit(
-        ['checkout', sourceBranch],
-        { cwd: clonePath, timeout: this.cloneTimeoutMs, onChild: opts.onChild },
-      );
+        // Materialize the source branch working tree.
+        await this._runGit(
+          ['checkout', sourceBranch],
+          { cwd: clonePath, timeout: this.cloneTimeoutMs, onChild: opts.onChild },
+        );
 
-      // Fetch the target branch too so the agent can diff against it.
-      await this._runGit(
-        ['fetch', 'origin', `${targetBranch}:${targetBranch}`],
-        { cwd: clonePath, timeout: this.fetchTimeoutMs, onChild: opts.onChild },
-      );
+        // Fetch the target branch too so the agent can diff against it.
+        await this._runGit(
+          ['fetch', 'origin', `${targetBranch}:${targetBranch}`],
+          { cwd: clonePath, timeout: this.fetchTimeoutMs, onChild: opts.onChild },
+        );
+      }
 
       this.log(`[LGTM] Clone complete: ${clonePath}`);
     } catch (err) {
@@ -105,7 +133,7 @@ class RepoCloner {
     const cloneUrl = this._buildCloneUrlFromParts(project, repo);
     const clonePath = path.join(
       this.tmpDir,
-      `lgtm-wi-${project}-${repo}-${workItemId || 'adhoc'}-${Date.now()}`,
+      `lgtm-wi-${safeName(project)}-${safeName(repo)}-${workItemId || 'adhoc'}-${Date.now()}`,
     );
 
     this.log(`[LGTM] Cloning default branch of ${project}/${repo} into ${clonePath}`);
@@ -175,33 +203,16 @@ class RepoCloner {
   }
 
   /**
-   * Build a git clone URL with embedded PAT authentication.
-   *
-   * For dev.azure.com:
-   *   https://<pat>@dev.azure.com/<org>/<project>/_git/<repo>
-   *
-   * For visualstudio.com:
-   *   https://<pat>@<org>.visualstudio.com/<project>/_git/<repo>
+   * The authenticated clone URL comes from the connection, which knows the
+   * service's URL shape (`…/_git/<repo>` for Azure DevOps, `…/<owner>/<repo>.git`
+   * for GitHub) and how to embed its credential.
    */
   _buildCloneUrl(pr) {
     return this._buildCloneUrlFromParts(pr.project, pr.repo);
   }
 
   _buildCloneUrlFromParts(project, repo) {
-    if (this._cloneUrlFor) return this._cloneUrlFor(project, repo);
-    try {
-      const u = new URL(this.orgUrl);
-      u.username = 'pat';
-      u.password = this.pat;
-      const repoPath = `/${encodeURIComponent(project)}/_git/${encodeURIComponent(repo)}`;
-      return `${u.origin}${u.pathname}${repoPath}`.replace(
-        u.origin,
-        `${u.protocol}//pat:${this.pat}@${u.host}`,
-      );
-    } catch {
-      const base = this.orgUrl.replace('https://', `https://pat:${this.pat}@`);
-      return `${base}/${encodeURIComponent(project)}/_git/${encodeURIComponent(repo)}`;
-    }
+    return this.connection.cloneUrl(project, repo);
   }
 
   /**

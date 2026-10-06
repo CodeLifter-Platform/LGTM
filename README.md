@@ -1,6 +1,6 @@
-# LGTM — Azure DevOps PR Reviewer
+# LGTM — PR Reviewer for Azure DevOps and GitHub
 
-A cross-platform menu bar app that lists your open Azure DevOps pull requests and runs AI-powered code reviews with a single click.
+A cross-platform menu bar app that lists your open pull requests, bugs and tickets from Azure DevOps and GitHub and runs AI-powered agents against them with a single click. A provider filter at the top of the toolbar switches between the services you have connected.
 
 [![Build & Release](https://github.com/CodeLifter-Platform/LGTM/actions/workflows/build.yml/badge.svg)](https://github.com/CodeLifter-Platform/LGTM/actions/workflows/build.yml)
 [![Latest Release](https://img.shields.io/github/v/release/CodeLifter-Platform/LGTM?include_prereleases&label=latest)](https://github.com/CodeLifter-Platform/LGTM/releases/latest)
@@ -39,21 +39,23 @@ are on `RELEASE_LEVEL=beta`, and GitHub never treats a prerelease as "latest".
 
 ## Features
 
+- **Two git services** — connect Azure DevOps and GitHub (github.com or GitHub Enterprise) side by side, each with its own token, and switch between them with the provider filter
 - **Multi-agent support** — choose between Claude Code, Codex, and Augment Code, each with selectable models
-- **Clone-then-review** — shallow-clones the repo remotely using your PAT, runs the agent against the full codebase in an isolated temp directory
+- **Clone-then-review** — partial-clones the repo using the service's token, runs the agent against the full codebase in an isolated temp directory
 - **Streaming review output** — real-time markdown-rendered review results streamed directly into the app
 - **Per-repo prompt configuration** — auto-detect from repo conventions, specify a file in the repo with autocomplete, set a custom local path with a native file picker, or fall back to a global default
-- **Secure PAT storage** — your Azure DevOps Personal Access Token is stored in the OS keychain (macOS Keychain / Windows Credential Manager) with encrypted fallback
-- **Live PR list** — all active PRs from your org displayed as `Repo/PrId/PRName`, sorted by creation date (newest first)
+- **Secure token storage** — each service's token is stored in the OS keychain (macOS Keychain / Windows Credential Manager / libsecret) with an encrypted fallback
+- **CodeLifter Design System** — dark and light themes from the platform tokens, Inter and JetBrains Mono bundled
+- **Live PR list** — all open PRs from your org or owner, grouped by repository, sorted by creation date (newest first)
 - **Status indicators** — pulsing yellow (cloning/in progress), green (completed), red (failed)
-- **Webhook + polling** — real-time updates via Azure DevOps Service Hooks with polling fallback
+- **Webhook + polling** — real-time updates via Azure DevOps Service Hooks or GitHub webhooks, with polling fallback
 - **Concurrent reviews** — run multiple reviews across different PRs simultaneously
 
 ## Prerequisites
 
 - **Node.js** 18+ and **npm**
 - At least one AI agent CLI installed and in PATH: `claude`, `codex`, or `auggie`
-- An **Azure DevOps PAT** with at least `Code (Read)` scope
+- An **Azure DevOps PAT** (Code, Work Items, Pull Request Threads) and/or a **GitHub token** (`repo`, `read:org`, `read:user`)
 
 ## Quick Start
 
@@ -62,7 +64,12 @@ npm install
 npm start
 ```
 
-On first launch the app appears in your menu bar / system tray and prompts for your Azure DevOps org URL and PAT.
+On first launch the app appears in your menu bar / system tray and asks you to connect a service: pick Azure DevOps or GitHub, paste the URL and a token. The other service can be added later from Settings → Connections or from the provider filter.
+
+```bash
+npm test                  # the Node test suite
+npm run test:coverage     # same, with the coverage table
+```
 
 ## Building from Source
 
@@ -90,7 +97,7 @@ Access settings via the gear icon in the app toolbar or right-click the tray ico
 | Default agent | Claude | Which AI agent to use for reviews |
 | Agent model | Per-agent default | Model selection per agent (e.g., Opus 4.6, Sonnet 4.6, o4-mini) |
 | Global prompt path | *(bundled)* | Fallback prompt file if no repo-specific prompt is found |
-| Webhook port | `3847` | Port for Azure DevOps Service Hook events |
+| Webhook port | `3847` | Port for Azure DevOps Service Hook and GitHub webhook events |
 | Polling interval | `60s` | PR list refresh interval |
 
 ### Per-Repo Prompt Resolution
@@ -110,13 +117,14 @@ src/
 ├── main/
 │   ├── main.js              # Electron main process, tray, window, IPC
 │   ├── preload.js           # Context bridge (renderer ↔ main)
-│   ├── pat-store.js         # Keytar + encrypted electron-store dual storage
+│   ├── token-store.js       # Per-service keytar + encrypted electron-store dual storage
+│   ├── providers/           # Provider registry + GitHub REST/GraphQL client
 │   ├── devops-client.js     # Azure DevOps REST API client
 │   ├── agent-registry.js    # Agent discovery (claude, codex, auggie)
 │   ├── agent-runner.js      # Clone → resolve prompt → spawn agent → stream output
 │   ├── repo-cloner.js       # Shallow git clone into temp directories
 │   ├── prompt-resolver.js   # Per-repo prompt resolution chain
-│   └── webhook-server.js    # HTTP server for DevOps webhooks
+│   └── webhook-server.js    # HTTP server for Azure DevOps service hooks and GitHub webhooks
 ├── renderer/
 │   ├── index.html           # App UI (PAT setup, PR list, review detail, settings)
 │   ├── styles.css           # Dark theme

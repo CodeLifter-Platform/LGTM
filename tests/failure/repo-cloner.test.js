@@ -6,7 +6,8 @@ const net = require('node:net');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { RepoCloner } = require('../../src/main/repo-cloner');
-const { hasGit, makeBareRepo, tempDir } = require('../helpers/fakes');
+const { Connection } = require('../../src/main/providers');
+const { hasGit, makeBareRepo, tempDir, fakeConnection } = require('../helpers/fakes');
 
 // git is a runtime dependency of the app itself; a machine without it
 // cannot run these, and says so instead of passing.
@@ -16,8 +17,10 @@ const PAT = 'secret-pat-value';
 
 const PR = (branch = 'feature/x') => ({ project: 'Alpha', repo: 'web', id: 7, sourceBranch: `refs/heads/${branch}`, targetBranch: 'refs/heads/main' });
 
+// A connection whose clone URL points at the local bare repo; the token is
+// what the cloner must keep out of every message.
 function clonerFor(repo, extra = {}) {
-  return new RepoCloner(PAT, 'https://dev.azure.com/o', { cloneUrlFor: () => repo.url, tmpDir: tempDir('lgtm-clones-'), log: quiet, ...extra });
+  return new RepoCloner(fakeConnection({ token: PAT, cloneUrl: () => repo.url }), { tmpDir: tempDir('lgtm-clones-'), log: quiet, ...extra });
 }
 
 test('A_PR_clone_checks_out_the_source_branch_fetches_the_target_branch_and_cleanup_removes_the_directory', { skip: gitless }, async () => {
@@ -76,18 +79,21 @@ test('Killing_the_git_child_handed_to_onChild_aborts_the_clone_and_cleans_up', {
   } finally { repo.remove(); }
 });
 
-test('The_PAT_is_embedded_in_the_clone_URL_with_the_port_and_collection_kept_but_never_appears_in_an_error', { skip: gitless }, async () => {
-  const onPrem = new RepoCloner(PAT, 'http://tfs.corp:8080/tfs/Coll/', { log: quiet });
+test('The_token_is_embedded_in_the_clone_URL_with_the_port_and_collection_kept_but_never_appears_in_an_error', { skip: gitless }, async () => {
+  const onPrem = new RepoCloner(new Connection('azure-devops', PAT, 'http://tfs.corp:8080/tfs/Coll/'), { log: quiet });
   assert.equal(onPrem._buildCloneUrlFromParts('My Proj', 'web'), `http://pat:${PAT}@tfs.corp:8080/tfs/Coll/My%20Proj/_git/web`);
-  const cloud = new RepoCloner(PAT, 'https://dev.azure.com/o', { log: quiet });
+  const cloud = new RepoCloner(new Connection('azure-devops', PAT, 'https://dev.azure.com/o'), { log: quiet });
   assert.equal(cloud._buildCloneUrl({ project: 'A', repo: 'r' }), `https://pat:${PAT}@dev.azure.com/o/A/_git/r`);
+  const gh = new RepoCloner(new Connection('github', PAT, 'https://github.com/acme'), { log: quiet });
+  assert.equal(gh._buildCloneUrl({ project: 'acme', repo: 'widgets' }), `https://x-access-token:${PAT}@github.com/acme/widgets.git`);
+  assert.throws(() => new RepoCloner(null), /cloneUrl/);
 
   // A port nothing listens on: git fails instantly with the URL in its message.
   const srv = net.createServer();
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   const port = srv.address().port;
   await new Promise((r) => srv.close(r));
-  const cloner = new RepoCloner(PAT, `http://127.0.0.1:${port}`, { tmpDir: tempDir('lgtm-clones-'), log: quiet, cloneTimeoutMs: 20000 });
+  const cloner = new RepoCloner(new Connection('azure-devops', PAT, `http://127.0.0.1:${port}`), { tmpDir: tempDir('lgtm-clones-'), log: quiet, cloneTimeoutMs: 20000 });
   let message = '';
   try { await cloner.clone(PR()); } catch (err) { message = err.message; }
   assert.match(message, /^Clone failed: /);
@@ -102,7 +108,7 @@ test('Cleanup_removes_a_directory_whose_name_carries_shell_characters_and_leaves
   fs.mkdirSync(victim);
   fs.mkdirSync(neighbour);
   fs.writeFileSync(path.join(victim, 'f.txt'), 'x');
-  const cloner = new RepoCloner('p', 'https://dev.azure.com/o', { log: quiet });
+  const cloner = new RepoCloner(fakeConnection({ token: 'p' }), { log: quiet });
   cloner._cleanup(victim);
   assert.equal(fs.existsSync(victim), false);
   assert.equal(fs.existsSync(neighbour), true);

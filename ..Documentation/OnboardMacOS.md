@@ -20,8 +20,17 @@ npm start
 lives in the menu bar. Click the tray icon to open the popover. If you are looking for a
 window in the taskbar, you are looking in the wrong place.
 
-You will need an Azure DevOps organisation URL and a PAT; the PAT is stored in the
-Keychain via keytar, not in the config file.
+You will need an Azure DevOps organisation URL and PAT, or a GitHub URL and token (or
+both); each token is stored in the Keychain via keytar, not in the config file.
+
+## Test
+
+```bash
+npm test
+```
+
+The suite runs on plain Node (no Electron) and covers the provider clients, the token
+store, attachment handling and the prompt sets. `npm run test:coverage` adds the table.
 
 ## Package
 

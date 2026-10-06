@@ -8,6 +8,8 @@
 const { htmlToText } = require('./html-text');
 
 function buildWorkItemDetailPrompt({ workItem, details, repoInfo, repoPrompt }) {
+  // GitHub issue bodies are markdown already; only HTML fields get stripped.
+  const strip = (body) => (details.bodyFormat === 'markdown' ? (body || '').trim() : htmlToText(body));
   const lines = [];
   if (repoPrompt && repoPrompt.trim()) {
     lines.push('# Repo-specific Rules', '', repoPrompt.trim(), '');
@@ -22,13 +24,13 @@ function buildWorkItemDetailPrompt({ workItem, details, repoInfo, repoPrompt }) 
   if (details.tags) lines.push(`- Tags: ${details.tags}`);
   if (workItem.webUrl) lines.push(`- URL: ${workItem.webUrl}`);
 
-  const desc = htmlToText(details.description);
+  const desc = strip(details.description);
   if (desc) lines.push('', '## Description', '', desc);
-  const repro = htmlToText(details.reproSteps);
+  const repro = strip(details.reproSteps);
   if (repro) lines.push('', '## Repro Steps', '', repro);
-  const sys = htmlToText(details.systemInfo);
+  const sys = strip(details.systemInfo);
   if (sys) lines.push('', '## System Info', '', sys);
-  const ac = htmlToText(details.acceptanceCriteria);
+  const ac = strip(details.acceptanceCriteria);
   if (ac) lines.push('', '## Acceptance Criteria', '', ac);
 
   lines.push('', '# Task', '');
@@ -53,7 +55,7 @@ function buildPrDetailPrompt({ pr, prDescription, universalPrompt, repoPrompt })
   lines.push('# Pull Request', '');
   lines.push(`- Project: ${pr.project}`);
   lines.push(`- Repo: ${pr.repo}`);
-  lines.push(`- PR ID: !${pr.id}`);
+  lines.push(`- PR ID: ${pr.provider === 'github' ? '#' : '!'}${pr.id}`);
   lines.push(`- Title: ${pr.title || ''}`);
   lines.push(`- Author: ${pr.createdBy || ''}`);
   lines.push(`- Source branch: ${sourceBranch}`);

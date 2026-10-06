@@ -48,7 +48,7 @@ test('Off_org_images_are_never_downloaded_and_are_listed_as_skipped', async () =
   const html = '<img src="https://i.imgur.com/leak.png"><img src="https://dev.azure.com/o/_apis/wit/attachments/9?fileName=shot.png">';
   const result = await downloadInlineImages([html], { devopsClient: client, clonePath: clone });
   assert.deepEqual(client.calls, ['https://dev.azure.com/o/_apis/wit/attachments/9?fileName=shot.png']);
-  assert.deepEqual(result.skipped, [{ originalUrl: 'https://i.imgur.com/leak.png', reason: 'not hosted on DevOps org' }]);
+  assert.deepEqual(result.skipped, [{ originalUrl: 'https://i.imgur.com/leak.png', reason: 'not hosted by the connected service' }]);
   assert.equal(result.downloaded.length, 1);
   assert.ok(result.downloaded[0].relPath.startsWith('.lgtm-attachments/img-001-'));
   assert.ok(result.downloaded[0].relPath.endsWith('.png'));

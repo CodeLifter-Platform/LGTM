@@ -10,7 +10,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { AgentRunner } = require('../../src/main/agent-runner');
-const { MemoryStore, collectNotify, fakeRegistry, realScenarioPrompts, tempDir } = require('../helpers/fakes');
+const { MemoryStore, collectNotify, fakeRegistry, realScenarioPrompts, tempDir, fakeConnection } = require('../helpers/fakes');
 
 const scenarioPrompts = realScenarioPrompts();
 const PR = { project: 'Alpha', repo: 'web', id: 7, title: 'T', repoId: 'r1', sourceBranch: 'refs/heads/feature/x', targetBranch: 'refs/heads/main', webUrl: 'https://u/7', createdBy: 'Ada', createdDate: '2026-01-01T00:00:00Z' };
@@ -46,13 +46,12 @@ function runner({ mode = 'ok', registry, cloner, killGraceMs = 300, ...deps } = 
     scenarioPrompts,
     promptResolver: { resolve: () => ({ path: null, source: 'none' }) },
     createCloner: () => theCloner,
-    createDevopsClient: () => fakeDevops(),
     cleanupDelayMs: 0,
     killGraceMs,
     ...deps,
   });
-  r.setCredentials('secret-pat', 'https://dev.azure.com/o');
-  r.setIdentity({ displayName: 'Rev', id: 'rev-1' });
+  r.setConnection(fakeConnection({ token: 'secret-pat', client: fakeDevops() }));
+  r.setIdentity('azure-devops', { displayName: 'Rev', id: 'rev-1' });
   const saveLog = console.log; console.log = () => {};
   const saveWarn = console.warn; console.warn = () => {};
   r.restoreConsole = () => { console.log = saveLog; console.warn = saveWarn; };
@@ -177,19 +176,29 @@ test('A_second_start_for_the_same_PR_is_refused_while_one_is_running_and_so_is_a
   } finally { r.restoreConsole(); }
 });
 
-test('An_unknown_or_uninstalled_agent_and_a_missing_PAT_are_refused_before_anything_is_cloned', async () => {
+test('An_unknown_or_uninstalled_agent_and_a_service_that_is_not_connected_are_refused_before_anything_is_cloned', async () => {
   const { runner: r, cloner } = runner({ registry: fakeRegistry({ available: false }) });
   try {
     assert.deepEqual(await r.startReview(PR, 'claude', null), { success: false, error: 'Fake claude is not installed.' });
     assert.deepEqual(await r.startReview(PR, 'nope', null), { success: false, error: 'Unknown agent: nope' });
     assert.deepEqual(cloner.cloned, []);
-    const unauthenticated = runner({ mode: 'ok' });
-    unauthenticated.runner.cloner = null;
-    const res = await unauthenticated.runner.startReview(PR, 'claude', null);
-    unauthenticated.runner.restoreConsole();
+
+    // The ADO connection is gone (disconnect-provider) but the row is an ADO row.
+    const disconnected = runner({ mode: 'ok' });
+    disconnected.runner.removeConnection('azure-devops');
+    assert.equal(disconnected.runner.hasConnection, false);
+    const res = await disconnected.runner.startReview(PR, 'claude', null);
     assert.equal(res.success, false);
-    assert.match(res.error, /Not authenticated — no PAT available for cloning/);
-    assert.equal(unauthenticated.runner.getReviewDetail(KEY).status, 'failed');
+    assert.match(res.error, /Not connected to Azure DevOps — connect it in Settings first/);
+    assert.equal(disconnected.runner.getReviewDetail(KEY).status, 'failed');
+
+    // A GitHub row while only ADO is connected names the missing service.
+    const adoOnly = runner({ mode: 'ok' });
+    const gh = await adoOnly.runner.startReview({ ...PR, provider: 'github' }, 'claude', null);
+    assert.match(gh.error, /Not connected to GitHub/);
+    assert.equal(adoOnly.cloner.cloned.length, 0, 'nothing cloned for a service that is not connected');
+    disconnected.runner.restoreConsole();
+    adoOnly.runner.restoreConsole();
   } finally { r.restoreConsole(); }
 });
 

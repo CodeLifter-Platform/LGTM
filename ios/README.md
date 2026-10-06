@@ -19,7 +19,7 @@ ios/
 │   ├── Theme.swift          # design tokens (LGTM midnight-blue palette, dark + light)
 │   ├── Models.swift         # PullRequest / PRThread / PRComment
 │   ├── DevOpsClient.swift   # PAT-authenticated Azure DevOps REST client (port of devops-client.js)
-│   ├── Keychain.swift       # encrypted PAT storage (mirrors the desktop pat-store)
+│   ├── Keychain.swift       # Keychain PAT storage (mirrors the desktop token-store)
 │   ├── PRListView.swift     # main screen — top bar + live PR list
 │   ├── PRDetailView.swift   # PR header, branch flow, comment threads
 │   └── SettingsSheet.swift  # org URL + PAT, "Test & Save"

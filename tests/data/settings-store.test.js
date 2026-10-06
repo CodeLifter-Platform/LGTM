@@ -16,6 +16,8 @@ test('Every_setting_round_trips_through_the_file_and_reads_back_identical_after_
   const store = open(cwd);
   const values = {
     orgUrl: 'https://dev.azure.com/o',
+    providerUrls: { github: 'https://github.com/acme' },
+    activeProvider: 'github',
     webhookPort: 4000,
     webhookHost: '0.0.0.0',
     webhookSecret: 's3',
