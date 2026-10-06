@@ -29,6 +29,37 @@ final class DevOpsClientTests: XCTestCase {
         XCTAssertEqual(r.project, "MyProject")
     }
 
+    func testRoutingSegmentsAfterTheProjectAreDropped() {
+        let r = DevOpsClient.parseOrgUrl("https://dev.azure.com/myorg/MyProject/_git/repo/pullrequest/12")
+        XCTAssertEqual(r.orgUrl, "https://dev.azure.com/myorg")
+        XCTAssertEqual(r.project, "MyProject")
+    }
+
+    // Regression (mirrors tests/core/parse-org-url.test.js on the desktop):
+    // the port was dropped and the `tfs` virtual directory was taken for the
+    // collection, making "DefaultCollection" the project filter.
+    func testOnPremKeepsPortAndTfsVirtualDirectoryAndTakesThirdSegmentAsProject() {
+        let r = DevOpsClient.parseOrgUrl("http://tfs.corp:8080/tfs/DefaultCollection/Proj")
+        XCTAssertEqual(r.orgUrl, "http://tfs.corp:8080/tfs/DefaultCollection")
+        XCTAssertEqual(r.project, "Proj")
+
+        let noProject = DevOpsClient.parseOrgUrl("http://tfs.corp:8080/tfs/DefaultCollection")
+        XCTAssertEqual(noProject.orgUrl, "http://tfs.corp:8080/tfs/DefaultCollection")
+        XCTAssertNil(noProject.project)
+    }
+
+    func testOnPremWithoutTfsVirtualDirectoryTreatsFirstSegmentAsCollection() {
+        let r = DevOpsClient.parseOrgUrl("https://ado.corp.example/DefaultCollection/Proj")
+        XCTAssertEqual(r.orgUrl, "https://ado.corp.example/DefaultCollection")
+        XCTAssertEqual(r.project, "Proj")
+    }
+
+    func testGarbageComesBackAsTypedWithNoProject() {
+        let r = DevOpsClient.parseOrgUrl("not a url")
+        XCTAssertEqual(r.orgUrl, "not a url")
+        XCTAssertNil(r.project)
+    }
+
     func testShortBranchStripsRefsHeads() {
         XCTAssertEqual(PullRequest.shortBranch("refs/heads/feature/foo"), "feature/foo")
     }

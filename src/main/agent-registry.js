@@ -101,9 +101,20 @@ function getEnhancedPath() {
   return parts.join(SEP);
 }
 
-// Apply the enhanced PATH to the process so child_process.spawn also sees it
-process.env.PATH = getEnhancedPath();
-console.log(`[LGTM] Effective PATH (${process.env.PATH.split(SEP).length} entries)`);
+/**
+ * Apply the enhanced PATH to the process so child_process.spawn also sees
+ * it. Called once from main.js at startup, never at import time: it spawns
+ * the user's login shell, which no library and no test should pay for by
+ * merely requiring this module. Idempotent.
+ */
+let pathInitialised = false;
+function initPath() {
+  if (pathInitialised) return process.env.PATH;
+  pathInitialised = true;
+  process.env.PATH = getEnhancedPath();
+  console.log(`[LGTM] Effective PATH (${process.env.PATH.split(SEP).length} entries)`);
+  return process.env.PATH;
+}
 
 /**
  * Pre-flight auth checks. Each returns { ok: true } or
@@ -233,9 +244,17 @@ const AGENTS = [
 ];
 
 class AgentRegistry {
-  constructor() {
+  /**
+   * @param {object} [deps]
+   * @param {(cli: string) => string|null} [deps.which]       - resolve a CLI name to an absolute path (default: `which`/`where`)
+   * @param {(agentId, ctx) => Promise<Array|null>} [deps.discover] - model discovery (default: model-discovery.js)
+   */
+  constructor({ which, discover } = {}) {
     this._cache = null;        // { agentId → boolean }
+    this._resolvedCli = null;  // { agentId → absolute path }
     this._modelCache = {};     // { agentId → [{id,label}] } — discovered, overlays hardcoded
+    this._which = which || AgentRegistry._resolveBinary;
+    this._discover = discover || discoverModelsFor;
   }
 
   /**
@@ -272,7 +291,7 @@ class AgentRegistry {
       let found = false;
 
       for (const name of cliNames) {
-        const absolutePath = AgentRegistry._resolveBinary(name);
+        const absolutePath = this._which(name);
         if (absolutePath) {
           this._cache[agent.id] = true;
           this._resolvedCli[agent.id] = absolutePath;
@@ -300,6 +319,7 @@ class AgentRegistry {
   buildCommand(agentId, prompt, model) {
     const agent = AGENTS.find((a) => a.id === agentId);
     if (!agent) throw new Error(`Unknown agent: ${agentId}`);
+    if (!this._cache) this.refresh();
     const resolvedCli = this._resolvedCli ? this._resolvedCli[agentId] : null;
     return agent.buildCmd(prompt, model, resolvedCli);
   }
@@ -332,7 +352,7 @@ class AgentRegistry {
       }
       const ctx = { resolvedCli: this._resolvedCli[agent.id] };
       tasks.push(
-        discoverModelsFor(agent.id, ctx)
+        Promise.resolve().then(() => this._discover(agent.id, ctx))
           .then((discovered) => {
             if (discovered && discovered.length > 0) {
               this._modelCache[agent.id] = discovered;
@@ -379,4 +399,4 @@ class AgentRegistry {
   }
 }
 
-module.exports = { AgentRegistry, AGENTS };
+module.exports = { AgentRegistry, AGENTS, initPath, getEnhancedPath };

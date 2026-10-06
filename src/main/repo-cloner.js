@@ -15,7 +15,7 @@
  * Each review gets its own isolated clone that is cleaned up after.
  */
 
-const { spawn, execSync } = require('child_process');
+const { spawn } = require('child_process');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -32,15 +32,25 @@ class RepoCloner {
   /**
    * @param {{ cloneUrl: function(project: string, repo: string): string, token?: string }} connection
    *   Anything with a `cloneUrl(project, repo)` that returns an HTTPS URL with
-   *   the credential embedded (`providers.Connection` does). `token` is kept
-   *   only so callers that hand the agent its credentials can read it.
+   *   the credential embedded (`providers.Connection` does; tests hand in a
+   *   stub pointing at a local bare repo). `token` is kept so the credential
+   *   can be redacted from every error message.
+   * @param {object} [opts]
+   * @param {string} [opts.tmpDir]           - where clones land (default os.tmpdir())
+   * @param {number} [opts.cloneTimeoutMs]
+   * @param {number} [opts.fetchTimeoutMs]
+   * @param {(line: string) => void} [opts.log]
    */
-  constructor(connection) {
+  constructor(connection, { tmpDir, cloneTimeoutMs, fetchTimeoutMs, log } = {}) {
     if (!connection || typeof connection.cloneUrl !== 'function') {
       throw new Error('RepoCloner needs a connection with cloneUrl(project, repo)');
     }
     this.connection = connection;
     this.pat = connection.token || null;
+    this.tmpDir = tmpDir || os.tmpdir();
+    this.cloneTimeoutMs = cloneTimeoutMs || CLONE_TIMEOUT_MS;
+    this.fetchTimeoutMs = fetchTimeoutMs || FETCH_TIMEOUT_MS;
+    this.log = log || console.log;
   }
 
   /**
@@ -58,12 +68,12 @@ class RepoCloner {
 
     const cloneUrl = this._buildCloneUrl(pr);
     const clonePath = path.join(
-      os.tmpdir(),
+      this.tmpDir,
       `lgtm-review-${safeName(pr.project)}-${safeName(pr.repo)}-${pr.id}-${Date.now()}`,
     );
 
-    console.log(`[LGTM] Cloning ${pr.project}/${pr.repo} into ${clonePath}`);
-    console.log(`[LGTM]   Source: ${sourceBranch}  Target: ${targetBranch}`);
+    this.log(`[LGTM] Cloning ${pr.project}/${pr.repo} into ${clonePath}`);
+    this.log(`[LGTM]   Source: ${sourceBranch}  Target: ${targetBranch}`);
 
     try {
       if (pr.isFork && pr.headRepo) {
@@ -74,39 +84,39 @@ class RepoCloner {
         const forkUrl = this.connection.cloneUrl(forkOwner, forkRepo);
         await this._runGit(
           ['clone', '--filter=blob:none', '--no-checkout', '--branch', targetBranch, cloneUrl, clonePath],
-          { timeout: CLONE_TIMEOUT_MS, onChild: opts.onChild },
+          { timeout: this.cloneTimeoutMs, onChild: opts.onChild },
         );
         await this._runGit(
           ['fetch', forkUrl, `${sourceBranch}:${sourceBranch}`],
-          { cwd: clonePath, timeout: FETCH_TIMEOUT_MS, onChild: opts.onChild },
+          { cwd: clonePath, timeout: this.fetchTimeoutMs, onChild: opts.onChild },
         );
         await this._runGit(
           ['checkout', sourceBranch],
-          { cwd: clonePath, timeout: CLONE_TIMEOUT_MS, onChild: opts.onChild },
+          { cwd: clonePath, timeout: this.cloneTimeoutMs, onChild: opts.onChild },
         );
       } else {
         await this._runGit(
           ['clone', '--filter=blob:none', '--no-checkout', '--branch', sourceBranch, cloneUrl, clonePath],
-          { timeout: CLONE_TIMEOUT_MS, onChild: opts.onChild },
+          { timeout: this.cloneTimeoutMs, onChild: opts.onChild },
         );
 
         // Materialize the source branch working tree.
         await this._runGit(
           ['checkout', sourceBranch],
-          { cwd: clonePath, timeout: CLONE_TIMEOUT_MS, onChild: opts.onChild },
+          { cwd: clonePath, timeout: this.cloneTimeoutMs, onChild: opts.onChild },
         );
 
         // Fetch the target branch too so the agent can diff against it.
         await this._runGit(
           ['fetch', 'origin', `${targetBranch}:${targetBranch}`],
-          { cwd: clonePath, timeout: FETCH_TIMEOUT_MS, onChild: opts.onChild },
+          { cwd: clonePath, timeout: this.fetchTimeoutMs, onChild: opts.onChild },
         );
       }
 
-      console.log(`[LGTM] Clone complete: ${clonePath}`);
+      this.log(`[LGTM] Clone complete: ${clonePath}`);
     } catch (err) {
       this._cleanup(clonePath);
-      throw new Error(`Clone failed: ${err.message}`);
+      throw new Error(`Clone failed: ${this._redact(err.message)}`);
     }
 
     return {
@@ -122,25 +132,25 @@ class RepoCloner {
   async cloneRepo(project, repo, workItemId, opts = {}) {
     const cloneUrl = this._buildCloneUrlFromParts(project, repo);
     const clonePath = path.join(
-      os.tmpdir(),
+      this.tmpDir,
       `lgtm-wi-${safeName(project)}-${safeName(repo)}-${workItemId || 'adhoc'}-${Date.now()}`,
     );
 
-    console.log(`[LGTM] Cloning default branch of ${project}/${repo} into ${clonePath}`);
+    this.log(`[LGTM] Cloning default branch of ${project}/${repo} into ${clonePath}`);
 
     try {
       await this._runGit(
         ['clone', '--filter=blob:none', '--no-checkout', cloneUrl, clonePath],
-        { timeout: CLONE_TIMEOUT_MS, onChild: opts.onChild },
+        { timeout: this.cloneTimeoutMs, onChild: opts.onChild },
       );
       await this._runGit(
         ['checkout', 'HEAD'],
-        { cwd: clonePath, timeout: CLONE_TIMEOUT_MS, onChild: opts.onChild },
+        { cwd: clonePath, timeout: this.cloneTimeoutMs, onChild: opts.onChild },
       );
-      console.log(`[LGTM] Clone complete: ${clonePath}`);
+      this.log(`[LGTM] Clone complete: ${clonePath}`);
     } catch (err) {
       this._cleanup(clonePath);
-      throw new Error(`Clone failed: ${err.message}`);
+      throw new Error(`Clone failed: ${this._redact(err.message)}`);
     }
 
     return { clonePath, cleanup: () => this._cleanup(clonePath) };
@@ -206,22 +216,29 @@ class RepoCloner {
   }
 
   /**
+   * The PAT must never reach a log line or an error shown to the user. git
+   * anonymises the URL in most of its messages, but not all; this is the
+   * belt to that brace.
+   */
+  _redact(text) {
+    if (!this.pat || !text) return text || '';
+    return String(text).split(this.pat).join('***');
+  }
+
+  /**
    * Remove a clone directory. Cleanup runs synchronously because it happens
    * after the agent run is done — the main process is no longer in the hot
-   * path here.
+   * path here. `fs.rmSync` takes the path as data, so a project or repo
+   * name with quotes or shell characters cannot escape into a shell.
    */
   _cleanup(dirPath) {
     try {
       if (fs.existsSync(dirPath)) {
-        if (process.platform === 'win32') {
-          execSync(`rmdir /s /q "${dirPath}"`, { stdio: 'ignore' });
-        } else {
-          execSync(`rm -rf "${dirPath}"`, { stdio: 'ignore' });
-        }
-        console.log(`[LGTM] Cleaned up clone: ${dirPath}`);
+        fs.rmSync(dirPath, { recursive: true, force: true, maxRetries: 3 });
+        this.log(`[LGTM] Cleaned up clone: ${dirPath}`);
       }
     } catch (err) {
-      console.warn(`[LGTM] Failed to clean up ${dirPath}:`, err.message);
+      this.log(`[LGTM] Failed to clean up ${dirPath}: ${err.message}`);
     }
   }
 }

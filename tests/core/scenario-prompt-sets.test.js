@@ -1,9 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('path');
-const { ScenarioPrompts, PROMPT_SETS } = require('../src/main/scenario-prompts');
+const { ScenarioPrompts, PROMPT_SETS } = require('../../src/main/scenario-prompts');
 
-const promptsDir = path.join(__dirname, '..', 'resources', 'prompts');
+const promptsDir = path.join(__dirname, '..', '..', 'resources', 'prompts');
 const origLog = console.log;
 test.before(() => { console.log = () => {}; });
 test.after(() => { console.log = origLog; });

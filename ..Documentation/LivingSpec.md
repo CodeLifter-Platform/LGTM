@@ -54,9 +54,12 @@ past the 0.9 line. This repo is **public**.
   StatusDot / Toast / Disclosure / ProgressBar vocabulary.
 - **Auto-update** via `electron-updater`, with native notifications on update available
   and update ready.
-- **Credential storage in the OS keychain** via `keytar` (libsecret on Linux), one entry
-  per service, with an encrypted `electron-store` fallback that is the read source of
-  truth so a hung keychain prompt can never block launch.
+- **Credential storage in the OS keychain** via `keytar` (libsecret on Linux, so unlike
+  Specter and Reps, LGTM already had a working Linux secret backend), one entry per
+  service. The keychain is the only store: a refusal or a hung prompt is reported to the
+  user (the token stays in memory for the session), not papered over with a file. Versions
+  before 0.6 kept an obfuscated file copy of the Azure DevOps PAT; it is migrated into the
+  keychain and emptied on first read.
 
 **Not done / known limits**
 
@@ -79,10 +82,15 @@ Electron, main process in `src/main/`:
 | `devops-client.js` | Azure DevOps API |
 | `agent-runner.js`, `agent-registry.js` | Agent execution per connection, and the agent catalogue |
 | `prompt-resolver.js`, `prompt-attachments.js`, `scenario-prompts.js` | Prompt construction; scenario prompts are loaded per provider |
-| `token-store.js` | Per-provider token persistence via keytar + encrypted fallback |
+| `token-store.js` | Per-provider token persistence via keytar (keychain only; legacy file drained on read) |
+| `settings.js` | Every `config.json` key, its default, the corrupt-file guard |
+| `pr-poller.js` | One per connection: polls the PR list, keeps the last good list on a failure, coalesces overlapping polls |
+| `raw-http.js` | The axios adapter the registry's startup token check runs through |
+| `core/` | Pure pieces main.js and the runner share: org URL parsing, prompt builders, connection validation mapping |
 | `repo-cloner.js`, `webhook-server.js`, `model-discovery.js` | Supporting services |
 
-Renderer in `src/renderer/` (`tokens.css` → `styles.css` → `app.js`), preload bridge in
+Renderer in `src/renderer/` (`tokens.css` → `styles.css`; `app.js` owns the DOM, `logic.js`
+holds the DOM-free decisions and is the part under test), preload bridge in
 `src/main/preload.js` with `contextIsolation: true` and `nodeIntegration: false`. Every
 PR / work item row carries `provider`; nothing in the renderer branches on the service
 except number prefixes (`!` for ADO, `#` for GitHub) and the nouns in hint text.
@@ -105,23 +113,28 @@ is caught and logged rather than fatal. All of this is behind a `TRAY_ONLY` flag
 ## Data and state
 
 `electron-store` for configuration: the Azure DevOps org URL (`orgUrl`), other services'
-URLs (`providerUrls`), the active provider, webhook port, polling interval, agent and
-model selections, per-repo prompt configuration, starred repos, filters. **Tokens live in
-the OS keychain** via keytar (`com.lgtm.azuredevops` / `com.lgtm.github`) with the
-encrypted fallback store, never in the config store. Repo-keyed settings (`project/repo`)
-are shared across services; on GitHub `project` is the owner login.
+URLs (`providerUrls`), the active provider, webhook port and bind host, polling interval,
+agent and model selections, per-repo prompt configuration, starred repos, filters; a
+corrupt `config.json` is reset to defaults rather than blocking the launch. **Tokens live
+in the OS keychain** via keytar (`com.lgtm.azuredevops` / `com.lgtm.github`), never in the
+config store and never in a file. Repo-keyed settings (`project/repo`) are shared across
+services; on GitHub `project` is the owner login. The webhook server listens on loopback
+by default and caps request bodies.
 
 ## Tests
 
 `tests/` on the Node test runner (`npm test`; `npm run test:coverage` prints the coverage
 table). The main-process modules import without Electron, so the suite covers the
-provider clients against a scripted HTTP stub (normalisation, status mapping, failure
-paths), the provider registry (clone URLs, agent env, webhook routing, token validation
-outcomes), the token store (round trips, a refusing or hanging keychain, distinct keys),
-attachment extraction (host allow-list, so a token never leaves its service), and the
-scenario prompt sets (both load, each names only its own service, required variables are
-enforced). CI runs it on ubuntu on every push and PR and on the macOS and Windows build
-legs before they package.
+provider clients (the real `azure-devops-node-api` client against a fake Azure DevOps
+server; the GitHub client against a scripted HTTP stub), the provider registry (clone
+URLs, agent env, webhook routing, the startup token check), the token store (round trips,
+a refusing or hanging keychain, the legacy-file migration), the webhook trust boundary,
+the agent runner's failure paths, attachment extraction (host allow-list, so a token never
+leaves its service), the scenario prompt sets, the renderer's DOM-free logic, and an
+end-to-end canary. CI runs it on ubuntu on every push and PR and on the macOS and
+Windows build legs before they package; the iPad head has its own XCTest target
+(`ios/Tests`), run by `ios.yml`. What is covered, what is deliberately not, and why:
+`CLAUDE.md` → Testing.
 
 ## External services
 

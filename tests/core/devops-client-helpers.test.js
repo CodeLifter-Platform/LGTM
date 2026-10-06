@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { DevOpsClient } = require('../src/main/devops-client');
+const { DevOpsClient } = require('../../src/main/devops-client');
 
 test('parseOrgUrl: dev.azure.com, visualstudio.com, on-prem, and junk', () => {
   assert.deepEqual(DevOpsClient.parseOrgUrl('https://dev.azure.com/acme'), { orgUrl: 'https://dev.azure.com/acme', project: null });

@@ -5,6 +5,9 @@ node_modules/
 dist/
 out/
 
+# Test coverage (npm run test:coverage)
+coverage/
+
 # Electron-builder cache
 .electron-builder-cache/
 
@@ -52,6 +55,6 @@ ios/LGTM/Info.plist
 *.xcworkspace/xcuserdata/
 DerivedData/
 
-# Core dumps from emulated-container packaging tests
-core
+# Core dumps from emulated-container packaging tests (root only: src/main/core/ is source)
+/core
 qemu_*.core

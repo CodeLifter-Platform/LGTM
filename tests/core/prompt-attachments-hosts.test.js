@@ -5,7 +5,7 @@ const os = require('os');
 const path = require('path');
 const {
   extractImageRefs, isProviderHostedUrl, isDevopsHostedUrl, downloadInlineImages, applySubstitutions, renderImagesSection,
-} = require('../src/main/prompt-attachments');
+} = require('../../src/main/prompt-attachments');
 
 test('extractImageRefs finds HTML <img> tags and markdown images', () => {
   const html = '<p>See <img src="https://dev.azure.com/acme/_apis/wit/attachments/1?fileName=a.png" alt="Login"> and</p>';

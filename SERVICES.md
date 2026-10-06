@@ -12,8 +12,10 @@ Last reviewed: 2026-10-06.
 - **Usage:** One of the two PR / work-item sources LGTM reviews — pull requests, threads,
   work items, comment posting via the Azure DevOps REST API (`src/main/devops-client.js`).
 - **Managed at:** The end user's Azure DevOps organization; PAT supplied by the user at
-  runtime (stored in OS secure storage under `com.lgtm.azuredevops`, never in config).
-  Scopes: Code (Read & Write), Work Items (Read & Write), Pull Request Threads.
+  runtime (stored in the OS keychain via keytar under `com.lgtm.azuredevops` and nowhere
+  else; a refusing keychain is reported, and the pre-0.6 obfuscated file copy is migrated
+  out on first read). Scopes: Code (Read & Write), Work Items (Read & Write), Pull Request
+  Threads.
 - **Handed to agents as:** `AZURE_DEVOPS_PAT`, `AZURE_DEVOPS_EXT_PAT`, `SYSTEM_ACCESSTOKEN`.
 
 ## GitHub (as a PR / issue source)
@@ -22,8 +24,8 @@ Last reviewed: 2026-10-06.
   comment posting via the GitHub REST and GraphQL APIs (`src/main/providers/github-client.js`).
   Distinct from the org's own GitHub use for CI and releases.
 - **Managed at:** The end user's GitHub account; a personal access token (classic or
-  fine-grained) supplied at runtime (stored in OS secure storage under `com.lgtm.github`,
-  never in config). Scopes: `repo`, `read:org`, `read:user`. GitHub Enterprise hosts work
+  fine-grained) supplied at runtime (stored in the OS keychain via keytar under
+  `com.lgtm.github`, never in config and never in a file). Scopes: `repo`, `read:org`, `read:user`. GitHub Enterprise hosts work
   through the same URL field.
 - **Handed to agents as:** `GITHUB_TOKEN`, `GH_TOKEN`.
 

@@ -1,8 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { PROVIDERS, PROVIDER_IDS, getProvider, describeProvider, Connection } = require('../src/main/providers');
-const { RepoCloner } = require('../src/main/repo-cloner');
-const { scriptedHttp } = require('./helpers');
+const { PROVIDERS, PROVIDER_IDS, getProvider, describeProvider, Connection } = require('../../src/main/providers');
+const { RepoCloner } = require('../../src/main/repo-cloner');
+const { scriptedHttp } = require('../helpers/scripted-http');
 
 test('registry: both providers are registered and describable without functions', () => {
   assert.deepEqual(PROVIDER_IDS, ['azure-devops', 'github']);

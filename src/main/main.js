@@ -3,15 +3,23 @@ const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const axios = require('axios');
 const { autoUpdater } = require('electron-updater');
+const ElectronStore = require('electron-store');
 const { TokenStore } = require('./token-store');
 const { PROVIDER_IDS, getProvider, describeProvider, Connection } = require('./providers');
 const { AgentRunner } = require('./agent-runner');
-const { AgentRegistry } = require('./agent-registry');
+const { AgentRegistry, initPath: initAgentPath } = require('./agent-registry');
 const { PromptResolver } = require('./prompt-resolver');
+const { PrPoller } = require('./pr-poller');
 const { WebhookServer } = require('./webhook-server');
-const ElectronStore = require('electron-store');
+const { rawHttp } = require('./raw-http');
+const { createRendererNotifier } = require('./renderer-notify');
+const { createSettingsStore, readSettings, writeSettings } = require('./settings');
+const { applyPrFilter } = require('./core/pr-filter');
+const { applySessionFlags } = require('./core/session-flags');
+const { serializeAgents } = require('./core/serialize-agents');
+const { buildPrDetailPrompt, buildWorkItemDetailPrompt } = require('./core/detail-prompts');
+const { validateConnection } = require('./core/validate-pat');
 
 // ── Globals ──────────────────────────────────────────────────────────
 let tray = null;
@@ -20,55 +28,27 @@ let tokenStore = null;
 let agentRunner = null;
 let agentRegistry = null;
 let webhookServer = null;
-let pollTimer = null;
 
-// One Connection per connected git service, keyed by provider id. A service
-// whose stored token was rejected at startup lands in `rejectedAtStartup`
-// so the renderer can say why the user is back on the connect screen; the
-// flag clears the moment a fresh token is accepted.
+// One Connection per connected git service, keyed by provider id. Each
+// carries its own PrPoller (`conn.poller`) so services poll independently
+// and a re-connect replaces the old poller instead of stacking a second
+// interval. A service whose stored token was rejected at startup lands in
+// `rejectedAtStartup` so the renderer can say why the user is back on the
+// connect screen; the flag clears the moment a fresh token is accepted.
+// `storageWarnings` holds, per provider, why the OS keychain refused to
+// store or hand back the token, so the renderer can say the token lives
+// in memory only for this session.
 const connections = new Map();
 const rejectedAtStartup = new Set();
+const storageWarnings = new Map();
 
-const config = new ElectronStore({
-  defaults: {
-    orgUrl: '',               // Azure DevOps organisation URL (legacy key, still the ADO one)
-    providerUrls: {},         // { [providerId]: url } — GitHub and any future service
-    activeProvider: '',       // which connected service the renderer shows
-    webhookPort: 3847,
-    promptPath: '',           // global fallback prompt path
-    pollingIntervalMs: 60000,
-    defaultAgent: 'claude',
-    agentModels: {},          // { agentId: selectedModelId }
-    repoConfigs: {},          // { "project/repo": { mode, repoFile, customPath } }
-    starredRepos: [],         // ["project/repo", ...] — starred repos are reviewed first
-    maxPrAgeDays: 7,          // only auto-review PRs created within this many days
-    lastUsedRepos: {},        // { [project]: "repoName" } — default for work item repo picker
-    bugsAgent: '',            // agent ID for bug runs (empty = fall back to defaultAgent)
-    bugsAgentModels: {},      // { [agentId]: modelId } for bug runs
-    bugsRepoConfigs: {},      // { "project/repo": "relative/path/to/prompt.md" }
-    ticketsAgent: '',         // agent ID for ticket runs
-    ticketsAgentModels: {},
-    ticketsRepoConfigs: {},
-    // Filter state for the Bugs / Tickets tabs. scope: 'mine' | 'all'.
-    // prFilter: 'all' | 'has' | 'none' — restricts to items with /
-    // without a linked PR. Defaults match what the user asked for:
-    // assigned-to-me, items without a PR (the "do something next" pile).
-    bugsFilters: { scope: 'mine', prFilter: 'none' },
-    ticketsFilters: { scope: 'mine', prFilter: 'none' },
-  },
-});
+// Settings live in config.json under userData. Every key, its default and
+// the corrupt-file guard are in ./settings.js; this file only wires the
+// Electron-aware store class in.
+const config = createSettingsStore(ElectronStore);
 
-/**
- * Drop work items that don't match the requested PR-linkage filter.
- * 'all' → no-op, 'has' → only items with a linked PR, 'none' → only
- * items without one. Items carry the `hasLinkedPR` flag from
- * the provider client (ADO: $expand=Relations; GitHub: closedByPullRequestsReferences).
- */
-function applyPrFilter(items, prFilter) {
-  if (!Array.isArray(items)) return [];
-  if (prFilter === 'has')  return items.filter((it) => it.hasLinkedPR);
-  if (prFilter === 'none') return items.filter((it) => !it.hasLinkedPR);
-  return items;
+function sendToRenderer(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
 }
 
 // ── Auto-updater ────────────────────────────────────────────────────
@@ -167,23 +147,6 @@ app.on('second-instance', () => {
   mainWindow.focus();
 });
 
-/**
- * axios adapter in the shape the provider registry's quickValidate expects:
- * resolves with { status, headers, data } and never throws on a status code.
- */
-async function rawHttp(req) {
-  const res = await axios.request({
-    method: req.method || 'GET',
-    url: req.url,
-    headers: req.headers,
-    data: req.data,
-    timeout: req.timeout || 10000,
-    maxRedirects: req.maxRedirects === undefined ? 5 : req.maxRedirects,
-    validateStatus: () => true,
-  });
-  return { status: res.status, headers: res.headers || {}, data: res.data };
-}
-
 function storedUrlFor(providerId) {
   if (providerId === 'azure-devops') return config.get('orgUrl') || '';
   const urls = config.get('providerUrls') || {};
@@ -212,12 +175,13 @@ function connectionStatus() {
     providers[id] = conn
       ? conn.toStatus()
       : { providerId: id, label: getProvider(id).label, short: getProvider(id).short, connected: false, url: storedUrlFor(id), rejected: rejectedAtStartup.has(id) };
+    providers[id].storageWarning = storageWarnings.get(id) || null;
   }
   return { providers, activeProvider: activeProviderId(), hasConnection: connections.size > 0 };
 }
 
 function broadcastConnectionStatus() {
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('connection-status', connectionStatus());
+  sendToRenderer('connection-status', connectionStatus());
 }
 
 /**
@@ -229,7 +193,9 @@ function broadcastConnectionStatus() {
  */
 async function restoreConnections() {
   for (const providerId of PROVIDER_IDS) {
-    const token = await tokenStore.get(providerId);
+    const stored = await tokenStore.get(providerId);
+    if (stored.error) storageWarnings.set(providerId, stored.error);
+    const token = stored.token;
     const url = storedUrlFor(providerId);
     if (!token || !url) continue;
     const provider = getProvider(providerId);
@@ -244,8 +210,14 @@ async function restoreConnections() {
   }
 }
 
-/** Register a connection everywhere it is needed and kick off its data. */
+/**
+ * Register a connection everywhere it is needed and kick off its data. A
+ * second connect for the same service (re-validating a token) replaces the
+ * first: its poller is stopped before the new one starts.
+ */
 function activateConnection(conn) {
+  const previous = connections.get(conn.providerId);
+  if (previous) teardownConnection(previous);
   connections.set(conn.providerId, conn);
   rejectedAtStartup.delete(conn.providerId);
   agentRunner.setConnection(conn);
@@ -262,9 +234,17 @@ function activateConnection(conn) {
 app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.dock.hide();
 
+  // Rebuild PATH from the user's login shell before any CLI lookup. This
+  // used to run at import time of agent-registry.js, which spawned a shell
+  // for every module that required it (tests included).
+  initAgentPath();
+
   tokenStore = new TokenStore();
   agentRegistry = new AgentRegistry();
-  agentRunner = new AgentRunner(config);
+  agentRunner = new AgentRunner(config, {
+    registry: agentRegistry,
+    notify: createRendererNotifier(),
+  });
 
   // Restore saved connections and wire up clients BEFORE creating the
   // window. The renderer pulls connection status on boot; if we created
@@ -406,43 +386,68 @@ async function initConnection(conn) {
   try {
     conn.user = await conn.client.getMe();
     console.log(`[LGTM] ${conn.label}: authenticated as ${conn.describeUser()}`);
-    if (mainWindow) mainWindow.webContents.send('current-user', { provider: conn.providerId, user: conn.toStatus().user });
+    sendToRenderer('current-user', { provider: conn.providerId, user: conn.toStatus().user });
     agentRunner.setIdentity(conn.providerId, conn.user);
   } catch (err) {
     console.warn(`[LGTM] ${conn.label}: could not resolve current user:`, err.message);
     conn.user = null;
     agentRunner.setIdentity(conn.providerId, null);
   }
+  // A newer connect or a disconnect raced us while getMe was in flight:
+  // the newer one owns the service; don't start a poller for a dead one.
+  if (connections.get(conn.providerId) !== conn) return;
 
-  pollPrs(conn.providerId);
-  ensurePolling();
-  ensureWebhookServer();
-}
-
-function ensurePolling() {
-  if (pollTimer) return;
-  pollTimer = setInterval(() => {
-    for (const id of connections.keys()) pollPrs(id);
-  }, config.get('pollingIntervalMs'));
-}
-
-function ensureWebhookServer() {
-  if (webhookServer) return;
-  webhookServer = new WebhookServer(config.get('webhookPort'), (event, headers) => {
-    handleWebhookEvent(event, headers);
+  // One poller per service. A fetch that throws reports the error and keeps
+  // the last good list on screen; the next success clears it (pr-poller.js).
+  conn.poller = new PrPoller({
+    fetch: () => conn.client.getAllOpenPRs(),
+    intervalMs: config.get('pollingIntervalMs'),
+    onList: (prs) => sendToRenderer('pr-list', { provider: conn.providerId, prs }),
+    onError: (message) => sendToRenderer('pr-error', { provider: conn.providerId, message }),
+    log: console.log,
   });
-  webhookServer.start();
+  conn.poller.start();
+  await ensureWebhookServer();
 }
 
-async function pollPrs(providerId) {
-  const conn = connections.get(providerId);
-  if (!conn || !mainWindow || mainWindow.isDestroyed()) return;
-  try {
-    const prs = await conn.client.getAllOpenPRs();
-    mainWindow.webContents.send('pr-list', { provider: providerId, prs });
-  } catch (err) {
-    mainWindow.webContents.send('pr-error', { provider: providerId, message: err.message });
+/** Stop a connection's poller; the webhook server is shared and stays. */
+function teardownConnection(conn) {
+  if (conn && conn.poller) {
+    conn.poller.stop();
+    conn.poller = null;
   }
+}
+
+/**
+ * The webhook server is shared by every connected service and started
+ * once. A port already in use is reported, not fatal: polling still works.
+ */
+async function ensureWebhookServer() {
+  if (webhookServer) return;
+  const server = new WebhookServer(config.get('webhookPort'), (event, headers) => handleWebhookEvent(event, headers), {
+    host: config.get('webhookHost'),
+    secret: config.get('webhookSecret'),
+    log: console.log,
+  });
+  webhookServer = server;
+  try {
+    await server.start();
+  } catch (err) {
+    console.warn(`[LGTM] Webhook server could not start on ${config.get('webhookHost') || 'loopback'}:${config.get('webhookPort')}: ${err.message}`);
+    if (webhookServer === server) webhookServer = null;
+  }
+}
+
+async function stopWebhookServer() {
+  const server = webhookServer;
+  webhookServer = null;
+  if (server) await server.stop();
+}
+
+/** Re-poll one service now (webhook event, manual refresh). No-op when not connected. */
+function pollPrs(providerId) {
+  const conn = connections.get(providerId);
+  return conn && conn.poller ? conn.poller.pollNow() : Promise.resolve();
 }
 
 /** Route a webhook to whichever connected service recognises it. */
@@ -457,83 +462,66 @@ function handleWebhookEvent(event, headers) {
 
 // ── IPC: Authentication ──────────────────────────────────────────────
 
-/**
- * Race a promise against a timeout. Used to guarantee the PAT-validation
- * IPC always returns to the renderer in bounded time, even if the
- * underlying SDK call hangs (DevOps slow path, DNS issue, keychain
- * prompt firing invisibly behind LGTM).
- */
-function withTimeout(promise, ms, label) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(
-      () => reject(new Error(`${label} timed out after ${ms}ms`)),
-      ms,
-    )),
-  ]);
-}
-
 ipcMain.handle('connect-provider', async (_event, { providerId, token, url }) => {
   let provider;
   try { provider = getProvider(providerId); } catch (err) { return { success: false, error: err.message }; }
   if (!token || !url) return { success: false, error: 'Both the URL and the token are required.' };
 
+  let conn;
   try {
-    const conn = new Connection(providerId, token, url);
-    console.log(`[LGTM] Connecting to ${provider.label}: ${conn.display}`);
-
-    // The ONLY thing we await is the call that proves the token actually
-    // works against this service. Everything else (keychain persistence,
-    // getMe(), webhook server, PR poll) runs in the background after we
-    // return — the renderer hooks events for whatever it needs.
-    const projects = await withTimeout(conn.client.getProjects(), 20000, 'getProjects');
-    if (!projects || projects.length === 0) {
-      return { success: false, error: `Token accepted but nothing to list — no ${provider.groupNoun}s visible.` };
-    }
-
-    // In-memory state is set synchronously so subsequent IPC calls
-    // (loadAgents, getSettings, refresh-prs) work immediately.
-    storeUrlFor(providerId, url);
-    config.set('activeProvider', providerId);
-    activateConnection(conn);
-
-    // Persist the token in the background. electron-store writes to disk
-    // synchronously, so even if keytar hangs on a hidden keychain prompt the
-    // fallback store still has the token for next launch.
-    tokenStore.set(providerId, token).catch((err) => {
-      console.warn(`[LGTM] ${provider.label} token persistence failed (in-memory still works):`, err.message);
-    });
-
-    return {
-      success: true,
-      providerId,
-      display: conn.display,
-      projects: projects.map((p) => p.name),
-      status: connectionStatus(),
-    };
+    conn = new Connection(providerId, token, url);
   } catch (err) {
-    const status = err.response?.status || err.status;
-    let msg = err.message;
-    if (status === 404) msg = `404 Not Found — check the ${provider.urlLabel.toLowerCase()}.`;
-    else if (status === 401 || status === 403) msg = `${status} — the token was rejected. Make sure it hasn't expired and has the scopes listed above.`;
-    return { success: false, error: msg };
+    return { success: false, error: err.message };
   }
+  console.log(`[LGTM] Connecting to ${provider.label}: ${conn.display}`);
+
+  // The one network call we await is the one that proves the token works
+  // against this service; every failure mode is mapped to a sentence in
+  // core/validate-pat.js. getMe(), the webhook server and the PR poll run in
+  // the background after we return.
+  const result = await validateConnection({ token, url, provider, createClient: () => conn.client });
+  if (!result.success) return result;
+
+  // In-memory state is set synchronously so subsequent IPC calls
+  // (loadAgents, getSettings, refresh-prs) work immediately.
+  storeUrlFor(providerId, url);
+  config.set('activeProvider', providerId);
+  activateConnection(conn);
+
+  // Persist the token to the OS keychain. The write is capped at a few
+  // seconds, and its outcome is reported, not assumed: a refusing keychain
+  // means the token is in memory for this session only, and the renderer
+  // says so.
+  const storage = await tokenStore.set(providerId, token);
+  if (storage.ok) storageWarnings.delete(providerId);
+  else {
+    storageWarnings.set(providerId, storage.error);
+    console.warn(`[LGTM] ${provider.label} token not persisted: ${storage.error}`);
+  }
+
+  return {
+    ...result,
+    providerId,
+    display: conn.display,
+    status: connectionStatus(),
+    storage,
+  };
 });
 
 ipcMain.handle('disconnect-provider', async (_event, providerId) => {
   try { getProvider(providerId); } catch (err) { return { success: false, error: err.message }; }
-  await tokenStore.delete(providerId);
+  const removed = await tokenStore.delete(providerId);
   storeUrlFor(providerId, '');
+  teardownConnection(connections.get(providerId));
   connections.delete(providerId);
   rejectedAtStartup.delete(providerId);
+  storageWarnings.delete(providerId);
   agentRunner.removeConnection(providerId);
   if (config.get('activeProvider') === providerId) config.set('activeProvider', activeProviderId());
-  if (connections.size === 0) {
-    if (webhookServer) { webhookServer.stop(); webhookServer = null; }
-    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-  }
+  if (connections.size === 0) await stopWebhookServer();
+  if (!removed.ok) console.warn(`[LGTM] disconnect ${providerId}: ${removed.error}`);
   broadcastConnectionStatus();
-  return { success: true, status: connectionStatus() };
+  return { success: true, status: connectionStatus(), warning: removed.ok ? null : removed.error };
 });
 
 ipcMain.handle('set-active-provider', (_event, providerId) => {
@@ -671,21 +659,6 @@ ipcMain.handle('save-log-file', async (_event, { key, suggestedName }) => {
 
 // ── IPC: Agents ──────────────────────────────────────────────────────
 
-// Strip non-serializable members (functions) before crossing the IPC
-// boundary. Electron's structured-clone serialization throws on any
-// function value, which silently rejects the renderer's promise and
-// leaves dropdowns/settings stuck. Drop everything that's a function
-// so adding new ones (next agent driver, etc.) doesn't relapse this.
-function serializeAgents(agentList) {
-  return agentList.map((agent) => {
-    const out = {};
-    for (const [k, v] of Object.entries(agent)) {
-      if (typeof v !== 'function') out[k] = v;
-    }
-    return out;
-  });
-}
-
 ipcMain.handle('get-agents', () => serializeAgents(agentRegistry.getAll()));
 
 ipcMain.handle('refresh-agents', async () => {
@@ -751,30 +724,6 @@ function resetTestSession(agentId) {
   testAgentInUse = agentId;
 }
 
-/**
- * Inject the agent-specific session-continuity flags on top of the
- * args buildCommand handed back. Mutates a fresh array; doesn't touch
- * the registry's defaults.
- *
- * Claude split: `--session-id <uuid>` CREATES a session with that ID
- * and refuses if one already exists ("session ID is already in use").
- * To continue, use `--resume <uuid>`. So turn 1 creates, turns 2+
- * resume.
- */
-function applySessionFlags(agentId, args) {
-  const out = [...args];
-  if (agentId === 'claude' && testSessionId) {
-    if (testFirstTurn) {
-      out.push('--session-id', testSessionId);
-    } else {
-      out.push('--resume', testSessionId);
-    }
-  } else if (agentId === 'augment' && !testFirstTurn) {
-    out.push('--continue');
-  }
-  return out;
-}
-
 ipcMain.handle('agent-test-version', async (_event, { agentId }) => {
   const agent = agentRegistry.get(agentId);
   if (!agent) return { success: false, error: `Unknown agent: ${agentId}` };
@@ -834,7 +783,7 @@ ipcMain.handle('agent-test-send', async (event, { agentId, model, message }) => 
 
   // Layer on session-continuity flags so the agent remembers prior turns
   // in this chat. Claude pins a UUID; auggie uses --continue from turn 2 on.
-  const finalArgs = applySessionFlags(agentId, args);
+  const finalArgs = applySessionFlags(agentId, args, { sessionId: testSessionId, firstTurn: testFirstTurn });
 
   const child = spawn(command, finalArgs, {
     cwd: testCwd,
@@ -948,86 +897,6 @@ function loadRepoPromptIfAny(pr, clonePath) {
   return '';
 }
 
-function buildWorkItemDetailPrompt({ workItem, details, repoInfo, repoPrompt }) {
-  const isMarkdown = details.bodyFormat === 'markdown';
-  const stripHtml = (html) => (isMarkdown ? (html || '').trim() : (html || '')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>/gi, '\n\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim());
-
-  const lines = [];
-  if (repoPrompt && repoPrompt.trim()) {
-    lines.push('# Repo-specific Rules', '', repoPrompt.trim(), '');
-  }
-  lines.push(`# ${details.type || workItem.type || 'Work Item'} #${details.id || workItem.id}`, '');
-  lines.push(`- Project: ${details.project || workItem.project}`);
-  lines.push(`- Repo: ${repoInfo.repo}`);
-  lines.push(`- Title: ${details.title || workItem.title || ''}`);
-  lines.push(`- State: ${details.state || ''}`);
-  if (details.priority != null) lines.push(`- Priority: ${details.priority}`);
-  if (details.severity) lines.push(`- Severity: ${details.severity}`);
-  if (details.tags) lines.push(`- Tags: ${details.tags}`);
-  if (workItem.webUrl) lines.push(`- URL: ${workItem.webUrl}`);
-
-  const desc = stripHtml(details.description);
-  if (desc) lines.push('', '## Description', '', desc);
-  const repro = stripHtml(details.reproSteps);
-  if (repro) lines.push('', '## Repro Steps', '', repro);
-  const sys = stripHtml(details.systemInfo);
-  if (sys) lines.push('', '## System Info', '', sys);
-  const ac = stripHtml(details.acceptanceCriteria);
-  if (ac) lines.push('', '## Acceptance Criteria', '', ac);
-
-  lines.push('', '# Task', '');
-  lines.push(
-    `Investigate this work item against the cloned repo. Read the relevant code, ` +
-    `propose a fix or implementation plan, and discuss with the user before making changes. ` +
-    `The user may follow up with questions — answer them based on the repo and work-item context.`,
-  );
-  return lines.join('\n');
-}
-
-function buildPrDetailPrompt({ pr, prDescription, universalPrompt, repoPrompt }) {
-  const sourceBranch = (pr.sourceBranch || '').replace(/^refs\/heads\//, '');
-  const targetBranch = (pr.targetBranch || '').replace(/^refs\/heads\//, '');
-  const lines = [];
-  if (universalPrompt.trim()) {
-    lines.push('# LGTM Review Rules', '', universalPrompt.trim(), '');
-  }
-  if (repoPrompt.trim()) {
-    lines.push('# Repo-specific Rules', '', repoPrompt.trim(), '');
-  }
-  lines.push('# Pull Request', '');
-  lines.push(`- Project: ${pr.project}`);
-  lines.push(`- Repo: ${pr.repo}`);
-  lines.push(`- PR ID: ${pr.provider === 'github' ? '#' : '!'}${pr.id}`);
-  lines.push(`- Title: ${pr.title || ''}`);
-  lines.push(`- Author: ${pr.createdBy || ''}`);
-  lines.push(`- Source branch: ${sourceBranch}`);
-  lines.push(`- Target branch: ${targetBranch}`);
-  if (pr.webUrl) lines.push(`- URL: ${pr.webUrl}`);
-  if (prDescription && prDescription.trim()) {
-    lines.push('', '## Description', '', prDescription.trim());
-  }
-  lines.push('');
-  lines.push('# Task');
-  lines.push('');
-  lines.push(
-    `You are reviewing this PR interactively. Start by reading the diff between ` +
-    `\`${targetBranch}\` and \`${sourceBranch}\` (use \`git diff ${targetBranch}...${sourceBranch}\` ` +
-    `or read changed files directly). Apply the rules above, then summarize what you find. ` +
-    `The user may follow up with questions — answer them based on the repo and PR context.`,
-  );
-  return lines.join('\n');
-}
-
 ipcMain.handle('agent-detail-prepare', async (_event, { target, agentId, model }) => {
   if (!agentRunner || !agentRunner.hasConnection) {
     return { success: false, error: 'Not connected yet — connect a git service first.' };
@@ -1131,12 +1000,7 @@ ipcMain.handle('agent-detail-send', async (event, { message }) => {
   // Layer on session-continuity flags. First turn for claude creates
   // the session via --session-id; later turns resume. Auggie uses
   // --continue from turn 2 onwards in the same cwd.
-  const finalArgs = [...args];
-  if (agentId === 'claude' && detailRun.sessionId) {
-    finalArgs.push(detailRun.firstTurn ? '--session-id' : '--resume', detailRun.sessionId);
-  } else if (agentId === 'augment' && !detailRun.firstTurn) {
-    finalArgs.push('--continue');
-  }
+  const finalArgs = applySessionFlags(agentId, args, { sessionId: detailRun.sessionId, firstTurn: detailRun.firstTurn });
 
   const child = spawn(command, finalArgs, {
     cwd: clonePath,
@@ -1192,46 +1056,12 @@ ipcMain.handle('agent-detail-cleanup', async () => {
 // ── IPC: Settings ────────────────────────────────────────────────────
 
 ipcMain.handle('get-settings', () => ({
-  orgUrl: config.get('orgUrl'),
-  providerUrls: config.get('providerUrls'),
+  ...readSettings(config),
   activeProvider: activeProviderId(),
-  webhookPort: config.get('webhookPort'),
-  promptPath: config.get('promptPath'),
-  pollingIntervalMs: config.get('pollingIntervalMs'),
-  defaultAgent: config.get('defaultAgent'),
-  agentModels: config.get('agentModels'),
-  repoConfigs: config.get('repoConfigs'),
-  starredRepos: config.get('starredRepos'),
-  maxPrAgeDays: config.get('maxPrAgeDays'),
-  lastUsedRepos: config.get('lastUsedRepos'),
-  bugsAgent: config.get('bugsAgent'),
-  bugsAgentModels: config.get('bugsAgentModels'),
-  bugsRepoConfigs: config.get('bugsRepoConfigs'),
-  ticketsAgent: config.get('ticketsAgent'),
-  ticketsAgentModels: config.get('ticketsAgentModels'),
-  ticketsRepoConfigs: config.get('ticketsRepoConfigs'),
-  bugsFilters: config.get('bugsFilters'),
-  ticketsFilters: config.get('ticketsFilters'),
 }));
 
 ipcMain.handle('save-settings', async (_event, settings) => {
-  if (settings.promptPath !== undefined) config.set('promptPath', settings.promptPath);
-  if (settings.webhookPort !== undefined) config.set('webhookPort', settings.webhookPort);
-  if (settings.pollingIntervalMs !== undefined) config.set('pollingIntervalMs', settings.pollingIntervalMs);
-  if (settings.defaultAgent !== undefined) config.set('defaultAgent', settings.defaultAgent);
-  if (settings.agentModels !== undefined) config.set('agentModels', settings.agentModels);
-  if (settings.repoConfigs !== undefined) config.set('repoConfigs', settings.repoConfigs);
-  if (settings.starredRepos !== undefined) config.set('starredRepos', settings.starredRepos);
-  if (settings.maxPrAgeDays !== undefined) config.set('maxPrAgeDays', settings.maxPrAgeDays);
-  if (settings.lastUsedRepos !== undefined) config.set('lastUsedRepos', settings.lastUsedRepos);
-  if (settings.bugsAgent !== undefined) config.set('bugsAgent', settings.bugsAgent);
-  if (settings.bugsAgentModels !== undefined) config.set('bugsAgentModels', settings.bugsAgentModels);
-  if (settings.bugsRepoConfigs !== undefined) config.set('bugsRepoConfigs', settings.bugsRepoConfigs);
-  if (settings.ticketsAgent !== undefined) config.set('ticketsAgent', settings.ticketsAgent);
-  if (settings.ticketsAgentModels !== undefined) config.set('ticketsAgentModels', settings.ticketsAgentModels);
-  if (settings.ticketsRepoConfigs !== undefined) config.set('ticketsRepoConfigs', settings.ticketsRepoConfigs);
-  if (settings.bugsFilters !== undefined) config.set('bugsFilters', settings.bugsFilters);
-  if (settings.ticketsFilters !== undefined) config.set('ticketsFilters', settings.ticketsFilters);
+  writeSettings(config, settings);
   return { success: true };
 });
 

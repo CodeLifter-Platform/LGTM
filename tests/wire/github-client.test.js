@@ -3,8 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { GitHubClient, priorityFromLabels, isBugLabel, typeFromIssue } = require('../src/main/providers/github-client');
-const { scriptedHttp, ghPr, ghIssue } = require('./helpers');
+const { GitHubClient, priorityFromLabels, isBugLabel, typeFromIssue } = require('../../src/main/providers/github-client');
+const { scriptedHttp, ghPr, ghIssue } = require('../helpers/scripted-http');
 
 // Quiet the client's console.warn/error noise inside tests.
 const origWarn = console.warn; const origError = console.error;
