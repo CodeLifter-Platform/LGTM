@@ -1,19 +1,19 @@
 /**
- * prompt-attachments — Pulls inline images out of Azure DevOps HTML
- * blobs (work item descriptions, repro steps, PR descriptions, comment
- * threads), downloads the ones hosted on the user's DevOps org, and
- * returns a substitution map so the caller can replace `<img>` tags with
- * filesystem-relative markers the agent can `Read`.
+ * prompt-attachments — Pulls inline images out of work item / PR text
+ * (Azure DevOps HTML fields, GitHub markdown bodies, comment threads),
+ * downloads the ones hosted by the connected service, and returns a
+ * substitution map so the caller can replace each image reference with a
+ * filesystem-relative marker the agent can `Read`.
  *
  * Why this exists: agents that support vision (Claude, GPT-4o, etc.)
  * can interpret screenshots — but only if the image is on local disk.
- * Inline DevOps images live behind PAT-authenticated URLs the agent
- * can't fetch on its own, so we materialize them at clone time.
+ * Inline images live behind token-authenticated URLs the agent can't
+ * fetch on its own, so we materialize them at clone time.
  *
- * Security: only URLs whose hostname matches the configured DevOps org
- * get downloaded. External CDNs (imgur, Slack files, screenshots
- * pasted from a public URL) are left as plain links — sending the PAT
- * to an arbitrary host would leak it.
+ * Security: only URLs whose hostname matches one of the connection's
+ * attachment hosts get downloaded. External CDNs (imgur, Slack files,
+ * screenshots pasted from a public URL) are left as plain links — sending
+ * the token to an arbitrary host would leak it.
  */
 
 const fs = require('fs');
@@ -28,6 +28,8 @@ const ATTACHMENT_DIR_NAME = '.lgtm-attachments';
 // small to avoid false positives on, e.g., logos in email signatures.
 const IMG_TAG_RE = /<img\b[^>]*?\bsrc\s*=\s*(['"])([^'"]+)\1[^>]*>/gi;
 const IMG_ALT_RE = /\balt\s*=\s*(['"])([^'"]*)\1/i;
+// GitHub bodies are markdown: ![alt](url "title")
+const MD_IMG_RE = /!\[([^\]]*)\]\(\s*(https?:\/\/[^\s)]+)(?:\s+"[^"]*")?\s*\)/g;
 
 const EXT_BY_MIME = {
   'image/png': '.png',
@@ -67,27 +69,37 @@ function extractImageRefs(html) {
     const altMatch = tag.match(IMG_ALT_RE);
     refs.push({ tag, url, alt: altMatch ? altMatch[2] : '' });
   }
+  MD_IMG_RE.lastIndex = 0;
+  while ((m = MD_IMG_RE.exec(html)) !== null) {
+    refs.push({ tag: m[0], url: m[2], alt: m[1] || '' });
+  }
   return refs;
 }
 
 /**
- * Decide whether a given image URL is hosted by the user's DevOps org.
- * Anything else (data: URIs, public CDNs, on-prem servers we don't
- * have creds for) gets skipped to avoid leaking the PAT.
+ * Decide whether a given image URL is hosted by the connected service.
+ * `hosts` is one hostname or a list; a URL matches on the exact host or a
+ * subdomain of it (dev.azure.com matches foo.dev.azure.com; githubusercontent.com
+ * matches user-images.githubusercontent.com). Anything else (data: URIs,
+ * public CDNs, servers we don't have creds for) is skipped so the token
+ * never leaves the service that issued it.
  */
-function isDevopsHostedUrl(url, orgHost) {
-  if (!orgHost) return false;
+function isProviderHostedUrl(url, hosts) {
+  const list = (Array.isArray(hosts) ? hosts : [hosts]).filter(Boolean).map((h) => String(h).toLowerCase());
+  if (list.length === 0) return false;
   try {
     const u = new URL(url);
     if (u.protocol !== 'https:' && u.protocol !== 'http:') return false;
     const host = u.hostname.toLowerCase();
-    const org = orgHost.toLowerCase();
-    // Match exact host OR subdomain (e.g. dev.azure.com matches
-    // foo.dev.azure.com). On-prem TFS often uses a single internal host.
-    return host === org || host.endsWith(`.${org}`);
+    return list.some((org) => host === org || host.endsWith(`.${org}`));
   } catch {
     return false;
   }
+}
+
+// Back-compat name for the single-host form.
+function isDevopsHostedUrl(url, orgHost) {
+  return isProviderHostedUrl(url, orgHost);
 }
 
 /**
@@ -105,8 +117,12 @@ function isDevopsHostedUrl(url, orgHost) {
  * `[image: .lgtm-attachments/img-001.png — "Login screen"]` inline
  * where the screenshot used to be.
  */
-async function downloadInlineImages(htmlBlobs, { devopsClient, clonePath, logger }) {
+async function downloadInlineImages(htmlBlobs, { devopsClient, client, hosts, clonePath, logger }) {
   const log = logger || (() => {});
+  const api = client || devopsClient;
+  const allowedHosts = hosts
+    || (api && Array.isArray(api.attachmentHosts) ? api.attachmentHosts : null)
+    || (api && api.orgHost ? [api.orgHost] : []);
   const dir = path.join(clonePath, ATTACHMENT_DIR_NAME);
   const downloaded = [];
   const skipped = [];
@@ -140,8 +156,8 @@ async function downloadInlineImages(htmlBlobs, { devopsClient, clonePath, logger
       continue;
     }
 
-    if (!isDevopsHostedUrl(ref.url, devopsClient.orgHost)) {
-      skipped.push({ originalUrl: ref.url, reason: 'not hosted on DevOps org' });
+    if (!isProviderHostedUrl(ref.url, allowedHosts)) {
+      skipped.push({ originalUrl: ref.url, reason: 'not hosted by the connected service' });
       seenUrls.set(ref.url, null);
       continue;
     }
@@ -154,7 +170,7 @@ async function downloadInlineImages(htmlBlobs, { devopsClient, clonePath, logger
     const tmpPath = path.join(dir, tmpName);
 
     try {
-      const result = await devopsClient.downloadAttachment(ref.url, tmpPath);
+      const result = await api.downloadAttachment(ref.url, tmpPath);
       const ext = (EXT_BY_MIME[result.contentType.split(';')[0].trim()] || guessExtFromUrl(ref.url) || '.bin');
       const finalName = `img-${indexed}-${shortHash(ref.url)}${ext}`;
       const finalPath = path.join(dir, finalName);
@@ -232,6 +248,7 @@ function renderImagesSection(downloaded) {
 module.exports = {
   ATTACHMENT_DIR_NAME,
   extractImageRefs,
+  isProviderHostedUrl,
   isDevopsHostedUrl,
   downloadInlineImages,
   applySubstitutions,

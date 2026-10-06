@@ -5,8 +5,8 @@ const os = require('os');
 const path = require('path');
 const axios = require('axios');
 const { autoUpdater } = require('electron-updater');
-const { PatStore } = require('./pat-store');
-const { DevOpsClient } = require('./devops-client');
+const { TokenStore } = require('./token-store');
+const { PROVIDER_IDS, getProvider, describeProvider, Connection } = require('./providers');
 const { AgentRunner } = require('./agent-runner');
 const { AgentRegistry } = require('./agent-registry');
 const { PromptResolver } = require('./prompt-resolver');
@@ -16,21 +16,24 @@ const ElectronStore = require('electron-store');
 // ── Globals ──────────────────────────────────────────────────────────
 let tray = null;
 let mainWindow = null;
-let patStore = null;
-let devopsClient = null;
+let tokenStore = null;
 let agentRunner = null;
 let agentRegistry = null;
 let webhookServer = null;
-let currentPat = null;
-let currentUser = null;
-// Flipped to true if a stored PAT was rejected by the org at startup.
-// Tied to !currentPat in get-pat-status so it auto-clears the moment
-// the user enters a fresh valid PAT.
-let patRejectedAtStartup = false;
+let pollTimer = null;
+
+// One Connection per connected git service, keyed by provider id. A service
+// whose stored token was rejected at startup lands in `rejectedAtStartup`
+// so the renderer can say why the user is back on the connect screen; the
+// flag clears the moment a fresh token is accepted.
+const connections = new Map();
+const rejectedAtStartup = new Set();
 
 const config = new ElectronStore({
   defaults: {
-    orgUrl: '',
+    orgUrl: '',               // Azure DevOps organisation URL (legacy key, still the ADO one)
+    providerUrls: {},         // { [providerId]: url } — GitHub and any future service
+    activeProvider: '',       // which connected service the renderer shows
     webhookPort: 3847,
     promptPath: '',           // global fallback prompt path
     pollingIntervalMs: 60000,
@@ -59,7 +62,7 @@ const config = new ElectronStore({
  * Drop work items that don't match the requested PR-linkage filter.
  * 'all' → no-op, 'has' → only items with a linked PR, 'none' → only
  * items without one. Items carry the `hasLinkedPR` flag from
- * DevOpsClient (populated via $expand=Relations).
+ * the provider client (ADO: $expand=Relations; GitHub: closedByPullRequestsReferences).
  */
 function applyPrFilter(items, prFilter) {
   if (!Array.isArray(items)) return [];
@@ -165,99 +168,111 @@ app.on('second-instance', () => {
 });
 
 /**
- * Cheapest authenticated round-trip against Azure DevOps. Hits
- * `_apis/ConnectionData?connectOptions=none` — the SDK uses this
- * under the hood for `getMe()` but going via axios skips the SDK
- * client warmup and gives us a tight timeout we control.
- *
- * Returns:
- *   { ok: true }                       — PAT works
- *   { ok: false, reason: 'rejected' }  — org responded but auth failed
- *   { ok: false, reason: 'unreachable' } — DNS / timeout / network
- *
- * The reason matters: a rejected PAT forces re-entry, but a network
- * blip should let the user into the app with whatever's cached.
+ * axios adapter in the shape the provider registry's quickValidate expects:
+ * resolves with { status, headers, data } and never throws on a status code.
  */
-async function quickValidatePat(pat, orgUrl) {
-  const parsed = DevOpsClient.parseOrgUrl(orgUrl);
-  if (!parsed.orgUrl) return { ok: false, reason: 'rejected' };
-  const auth = Buffer.from(`:${pat}`).toString('base64');
-  const url = `${parsed.orgUrl}/_apis/ConnectionData?connectOptions=none&api-version=7.0`;
-  try {
-    const res = await axios.get(url, {
-      timeout: 4000,
-      headers: { Authorization: `Basic ${auth}`, Accept: 'application/json' },
-      validateStatus: () => true,            // we want to inspect the code ourselves
-      maxRedirects: 0,                       // ADO redirects unauth'd traffic to the sign-in page
-    });
-    const user = res.data && res.data.authenticatedUser;
-    // ADO's "your PAT is bad" signal is a 203 with HTML, not a 401 —
-    // hence the explicit user.id check.
-    if (res.status === 200 && user && user.id) {
-      return { ok: true };
-    }
-    if (res.status === 401 || res.status === 403 || res.status === 203) {
-      return { ok: false, reason: 'rejected' };
-    }
-    return { ok: false, reason: 'unreachable' };
-  } catch (err) {
-    const code = err && err.code;
-    if (code === 'ENOTFOUND' || code === 'ECONNREFUSED' || code === 'ETIMEDOUT'
-        || code === 'ECONNABORTED' || code === 'EAI_AGAIN' || code === 'ENETUNREACH') {
-      return { ok: false, reason: 'unreachable' };
-    }
-    // Unknown failure mode — be conservative and don't lock the user out.
-    console.warn('[LGTM] quickValidatePat error (treating as unreachable):', err.message);
-    return { ok: false, reason: 'unreachable' };
+async function rawHttp(req) {
+  const res = await axios.request({
+    method: req.method || 'GET',
+    url: req.url,
+    headers: req.headers,
+    data: req.data,
+    timeout: req.timeout || 10000,
+    maxRedirects: req.maxRedirects === undefined ? 5 : req.maxRedirects,
+    validateStatus: () => true,
+  });
+  return { status: res.status, headers: res.headers || {}, data: res.data };
+}
+
+function storedUrlFor(providerId) {
+  if (providerId === 'azure-devops') return config.get('orgUrl') || '';
+  const urls = config.get('providerUrls') || {};
+  return urls[providerId] || '';
+}
+
+function storeUrlFor(providerId, url) {
+  if (providerId === 'azure-devops') { config.set('orgUrl', url); return; }
+  const urls = { ...(config.get('providerUrls') || {}) };
+  if (url) urls[providerId] = url; else delete urls[providerId];
+  config.set('providerUrls', urls);
+}
+
+function activeProviderId() {
+  const stored = config.get('activeProvider');
+  if (stored && connections.has(stored)) return stored;
+  const first = connections.keys().next();
+  return first.done ? '' : first.value;
+}
+
+/** Renderer-safe snapshot of every provider: connected or not, and why. */
+function connectionStatus() {
+  const providers = {};
+  for (const id of PROVIDER_IDS) {
+    const conn = connections.get(id);
+    providers[id] = conn
+      ? conn.toStatus()
+      : { providerId: id, label: getProvider(id).label, short: getProvider(id).short, connected: false, url: storedUrlFor(id), rejected: rejectedAtStartup.has(id) };
   }
+  return { providers, activeProvider: activeProviderId(), hasConnection: connections.size > 0 };
+}
+
+function broadcastConnectionStatus() {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('connection-status', connectionStatus());
+}
+
+/**
+ * Restore every provider that has a stored token. The token is fast-checked
+ * so a dead one never lets the main UI open for that service — the renderer
+ * sees it disconnected with `rejected: true`. A network blip gives the
+ * cached token the benefit of the doubt so the user isn't locked out
+ * offline.
+ */
+async function restoreConnections() {
+  for (const providerId of PROVIDER_IDS) {
+    const token = await tokenStore.get(providerId);
+    const url = storedUrlFor(providerId);
+    if (!token || !url) continue;
+    const provider = getProvider(providerId);
+    const t0 = Date.now();
+    const check = await provider.quickValidate(token, url, rawHttp);
+    console.log(`[LGTM] Startup ${provider.label} token check: ${check.ok ? 'ok' : check.reason} in ${Date.now() - t0}ms`);
+    if (check.ok || check.reason === 'unreachable') {
+      activateConnection(new Connection(providerId, token, url));
+    } else {
+      rejectedAtStartup.add(providerId);
+    }
+  }
+}
+
+/** Register a connection everywhere it is needed and kick off its data. */
+function activateConnection(conn) {
+  connections.set(conn.providerId, conn);
+  rejectedAtStartup.delete(conn.providerId);
+  agentRunner.setConnection(conn);
+  if (!config.get('activeProvider') || !connections.has(config.get('activeProvider'))) {
+    config.set('activeProvider', conn.providerId);
+  }
+  initConnection(conn).catch((err) => {
+    console.warn(`[LGTM] init ${conn.label} error (background):`, err.message);
+  });
+  broadcastConnectionStatus();
 }
 
 // ── App lifecycle ────────────────────────────────────────────────────
 app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.dock.hide();
 
-  patStore = new PatStore();
+  tokenStore = new TokenStore();
   agentRegistry = new AgentRegistry();
   agentRunner = new AgentRunner(config);
 
-  // Load the saved PAT and wire up clients BEFORE creating the
-  // window. The renderer pulls PAT status via `get-pat-status` on
-  // boot; if we created the window first, there'd be a race where
-  // the renderer could invoke the IPC handler before currentPat
-  // was populated. Doing it first guarantees the answer is ready.
-  //
-  // We also fast-validate the stored PAT here. The whole point is
-  // that a dead PAT never lets the main UI open — the renderer
-  // sees hasPat=false and lands on the setup form. We deliberately
-  // await the validation so the answer to get-pat-status is final
-  // by the time the renderer asks.
-  const existingPat = await patStore.get();
-  const orgUrl = config.get('orgUrl');
-  if (existingPat && orgUrl) {
-    const t0 = Date.now();
-    const check = await quickValidatePat(existingPat, orgUrl);
-    console.log(`[LGTM] Startup PAT check: ${check.ok ? 'ok' : check.reason} in ${Date.now() - t0}ms`);
-    if (check.ok) {
-      currentPat = existingPat;
-      agentRunner.setCredentials(existingPat, DevOpsClient.parseOrgUrl(orgUrl).orgUrl);
-      initDevOps(existingPat, orgUrl).catch((err) => {
-        console.warn('[LGTM] initDevOps error (background):', err.message);
-      });
-    } else if (check.reason === 'rejected') {
-      // Force re-entry: leave currentPat null so the renderer's
-      // boot flow lands on the PAT setup view with patExpired set.
-      patRejectedAtStartup = true;
-    } else {
-      // Network blip — give the cached PAT the benefit of the doubt
-      // so the user isn't locked out offline. initDevOps will retry
-      // on its own polling cadence once connectivity returns.
-      currentPat = existingPat;
-      agentRunner.setCredentials(existingPat, DevOpsClient.parseOrgUrl(orgUrl).orgUrl);
-      initDevOps(existingPat, orgUrl).catch((err) => {
-        console.warn('[LGTM] initDevOps error (background):', err.message);
-      });
-    }
-  }
+  // Restore saved connections and wire up clients BEFORE creating the
+  // window. The renderer pulls connection status on boot; if we created
+  // the window first, there'd be a race where the renderer could invoke
+  // the IPC handler before the connections were populated. Doing it
+  // first guarantees the answer is ready, and we deliberately await the
+  // token checks so the answer is final by the time the renderer asks.
+  await restoreConnections();
 
   // A tray failure must never take the app down with it. On macOS/Windows that would be
   // fatal anyway (the tray is the only entry point), but on Linux the window stands on
@@ -286,18 +301,12 @@ app.whenReady().then(async () => {
     .catch((err) => console.warn('[LGTM] Background model discovery failed:', err.message));
 });
 
-// Renderer asks for PAT status as part of its own boot sequence —
-// guaranteed to arrive at a moment when the renderer is ready to
-// react to the answer.
-//
-// `patExpired` lets the renderer pre-fill the org URL and tell the
-// user *why* they're back on the setup screen. It's gated on
-// !currentPat so it auto-clears as soon as a fresh PAT is accepted.
-ipcMain.handle('get-pat-status', () => ({
-  hasPat: !!currentPat,
-  orgUrl: config.get('orgUrl') || '',
-  patExpired: patRejectedAtStartup && !currentPat,
-}));
+// Renderer asks for connection status as part of its own boot sequence —
+// guaranteed to arrive at a moment when the renderer is ready to react to
+// the answer. A provider with `rejected: true` lets the renderer pre-fill
+// its URL and tell the user *why* they're back on the connect screen.
+ipcMain.handle('get-connection-status', () => connectionStatus());
+ipcMain.handle('get-providers', () => PROVIDER_IDS.map(describeProvider));
 
 app.on('window-all-closed', (e) => e.preventDefault());
 
@@ -390,43 +399,59 @@ function showSettings() {
   if (!mainWindow.isVisible()) toggleWindow();
 }
 
-// ── DevOps initialisation ────────────────────────────────────────────
-async function initDevOps(pat, orgUrl) {
-  devopsClient = new DevOpsClient(pat, orgUrl);
-
-  // Identify the authenticated user so the UI can flag "my PRs".
+// ── Connection initialisation ───────────────────────────────────────
+async function initConnection(conn) {
+  // Identify the authenticated user so the UI can flag "my PRs" and the
+  // agent prompts can name who they act as.
   try {
-    currentUser = await devopsClient.getMe();
-    console.log(`[LGTM] Authenticated as: ${currentUser.displayName || currentUser.email || currentUser.id}`);
-    if (mainWindow) mainWindow.webContents.send('current-user', currentUser);
-    if (agentRunner) agentRunner.setIdentity(currentUser);
+    conn.user = await conn.client.getMe();
+    console.log(`[LGTM] ${conn.label}: authenticated as ${conn.describeUser()}`);
+    if (mainWindow) mainWindow.webContents.send('current-user', { provider: conn.providerId, user: conn.toStatus().user });
+    agentRunner.setIdentity(conn.providerId, conn.user);
   } catch (err) {
-    console.warn('[LGTM] Could not resolve current user:', err.message);
-    currentUser = null;
-    if (agentRunner) agentRunner.setIdentity(null);
+    console.warn(`[LGTM] ${conn.label}: could not resolve current user:`, err.message);
+    conn.user = null;
+    agentRunner.setIdentity(conn.providerId, null);
   }
 
-  pollPrs();
-  setInterval(pollPrs, config.get('pollingIntervalMs'));
+  pollPrs(conn.providerId);
+  ensurePolling();
+  ensureWebhookServer();
+}
 
-  webhookServer = new WebhookServer(config.get('webhookPort'), (event) => {
-    handleWebhookEvent(event);
+function ensurePolling() {
+  if (pollTimer) return;
+  pollTimer = setInterval(() => {
+    for (const id of connections.keys()) pollPrs(id);
+  }, config.get('pollingIntervalMs'));
+}
+
+function ensureWebhookServer() {
+  if (webhookServer) return;
+  webhookServer = new WebhookServer(config.get('webhookPort'), (event, headers) => {
+    handleWebhookEvent(event, headers);
   });
   webhookServer.start();
 }
 
-async function pollPrs() {
+async function pollPrs(providerId) {
+  const conn = connections.get(providerId);
+  if (!conn || !mainWindow || mainWindow.isDestroyed()) return;
   try {
-    const prs = await devopsClient.getAllOpenPRs();
-    mainWindow.webContents.send('pr-list', prs);
+    const prs = await conn.client.getAllOpenPRs();
+    mainWindow.webContents.send('pr-list', { provider: providerId, prs });
   } catch (err) {
-    mainWindow.webContents.send('pr-error', err.message);
+    mainWindow.webContents.send('pr-error', { provider: providerId, message: err.message });
   }
 }
 
-function handleWebhookEvent(event) {
-  if (event.eventType && event.eventType.startsWith('git.pullrequest')) {
-    pollPrs();
+/** Route a webhook to whichever connected service recognises it. */
+function handleWebhookEvent(event, headers) {
+  for (const conn of connections.values()) {
+    if (conn.provider.isWebhookEvent(event, headers)) {
+      pollPrs(conn.providerId);
+      return;
+    }
   }
 }
 
@@ -448,99 +473,123 @@ function withTimeout(promise, ms, label) {
   ]);
 }
 
-ipcMain.handle('validate-pat', async (_event, { pat, orgUrl }) => {
-  try {
-    const client = new DevOpsClient(pat, orgUrl);
-    const parsed = DevOpsClient.parseOrgUrl(orgUrl);
-    console.log(`[LGTM] Connecting to org: ${parsed.orgUrl}${parsed.project ? ` (project filter: ${parsed.project})` : ''}`);
+ipcMain.handle('connect-provider', async (_event, { providerId, token, url }) => {
+  let provider;
+  try { provider = getProvider(providerId); } catch (err) { return { success: false, error: err.message }; }
+  if (!token || !url) return { success: false, error: 'Both the URL and the token are required.' };
 
-    // The ONLY thing we await is the call that proves the PAT actually
-    // works against this org. Everything else (keychain persistence,
-    // getMe(), webhook server, PR poll) runs in the background after
-    // we return — the renderer hooks events for whatever it needs.
-    const projects = await withTimeout(client.getProjects(), 20000, 'getProjects');
+  try {
+    const conn = new Connection(providerId, token, url);
+    console.log(`[LGTM] Connecting to ${provider.label}: ${conn.display}`);
+
+    // The ONLY thing we await is the call that proves the token actually
+    // works against this service. Everything else (keychain persistence,
+    // getMe(), webhook server, PR poll) runs in the background after we
+    // return — the renderer hooks events for whatever it needs.
+    const projects = await withTimeout(conn.client.getProjects(), 20000, 'getProjects');
     if (!projects || projects.length === 0) {
-      return { success: false, error: 'PAT valid but no projects found.' };
+      return { success: false, error: `Token accepted but nothing to list — no ${provider.groupNoun}s visible.` };
     }
 
     // In-memory state is set synchronously so subsequent IPC calls
     // (loadAgents, getSettings, refresh-prs) work immediately.
-    config.set('orgUrl', orgUrl);
-    currentPat = pat;
-    agentRunner.setCredentials(pat, parsed.orgUrl);
+    storeUrlFor(providerId, url);
+    config.set('activeProvider', providerId);
+    activateConnection(conn);
 
-    // Persist the PAT and finish wiring up DevOps in the background.
-    // electron-store writes to disk synchronously, so even if keytar
-    // hangs on a hidden keychain prompt the fallback store still has
-    // the PAT for next launch.
-    patStore.set(pat).catch((err) => {
-      console.warn('[LGTM] PAT persistence failed (in-memory still works):', err.message);
-    });
-    initDevOps(pat, orgUrl).catch((err) => {
-      console.warn('[LGTM] initDevOps error (background):', err.message);
+    // Persist the token in the background. electron-store writes to disk
+    // synchronously, so even if keytar hangs on a hidden keychain prompt the
+    // fallback store still has the token for next launch.
+    tokenStore.set(providerId, token).catch((err) => {
+      console.warn(`[LGTM] ${provider.label} token persistence failed (in-memory still works):`, err.message);
     });
 
     return {
       success: true,
+      providerId,
+      display: conn.display,
       projects: projects.map((p) => p.name),
-      filterNote: parsed.project ? ` Filtered to project "${parsed.project}".` : '',
+      status: connectionStatus(),
     };
   } catch (err) {
-    const status = err.response?.status;
-    const parsed = DevOpsClient.parseOrgUrl(orgUrl);
+    const status = err.response?.status || err.status;
     let msg = err.message;
-    if (status === 404) msg = `404 Not Found — API call to ${parsed.orgUrl}/_apis/projects failed. Check your org URL.`;
-    else if (status === 401 || status === 403) msg = `${status} — PAT was rejected. Make sure it hasn't expired and has Code (Read) scope.`;
+    if (status === 404) msg = `404 Not Found — check the ${provider.urlLabel.toLowerCase()}.`;
+    else if (status === 401 || status === 403) msg = `${status} — the token was rejected. Make sure it hasn't expired and has the scopes listed above.`;
     return { success: false, error: msg };
   }
 });
 
-ipcMain.handle('clear-pat', async () => {
-  await patStore.delete();
-  config.set('orgUrl', '');
-  currentPat = null;
-  currentUser = null;
-  devopsClient = null;
-  patRejectedAtStartup = false;
-  if (webhookServer) webhookServer.stop();
-  return { success: true };
+ipcMain.handle('disconnect-provider', async (_event, providerId) => {
+  try { getProvider(providerId); } catch (err) { return { success: false, error: err.message }; }
+  await tokenStore.delete(providerId);
+  storeUrlFor(providerId, '');
+  connections.delete(providerId);
+  rejectedAtStartup.delete(providerId);
+  agentRunner.removeConnection(providerId);
+  if (config.get('activeProvider') === providerId) config.set('activeProvider', activeProviderId());
+  if (connections.size === 0) {
+    if (webhookServer) { webhookServer.stop(); webhookServer = null; }
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+  broadcastConnectionStatus();
+  return { success: true, status: connectionStatus() };
 });
 
-ipcMain.handle('get-me', () => currentUser);
+ipcMain.handle('set-active-provider', (_event, providerId) => {
+  if (!connections.has(providerId)) return { success: false, error: `${providerId} is not connected.` };
+  config.set('activeProvider', providerId);
+  return { success: true, status: connectionStatus() };
+});
+
+ipcMain.handle('get-me', (_event, providerId) => {
+  const conn = connections.get(providerId || activeProviderId());
+  return conn && conn.user ? conn.toStatus().user : null;
+});
 
 // ── IPC: PRs ─────────────────────────────────────────────────────────
 
-ipcMain.handle('refresh-prs', async () => {
-  if (!devopsClient) return { success: false, error: 'Not authenticated' };
+function connectionOrError(params) {
+  const providerId = (params && params.provider) || activeProviderId();
+  const conn = connections.get(providerId);
+  if (!conn) return { error: { success: false, error: `Not connected to ${providerId || 'any service'}` } };
+  return { conn };
+}
+
+ipcMain.handle('refresh-prs', async (_event, params = {}) => {
+  const { conn, error } = connectionOrError(params);
+  if (error) return error;
   try {
-    const prs = await devopsClient.getAllOpenPRs();
-    return { success: true, prs };
+    const prs = await conn.client.getAllOpenPRs();
+    return { success: true, provider: conn.providerId, prs };
   } catch (err) {
-    return { success: false, error: err.message };
+    return { success: false, provider: conn.providerId, error: err.message };
   }
 });
 
 // ── IPC: Bugs ────────────────────────────────────────────────────────
 
 ipcMain.handle('refresh-bugs', async (_event, params = {}) => {
-  if (!devopsClient) return { success: false, error: 'Not authenticated' };
+  const { conn, error } = connectionOrError(params);
+  if (error) return error;
   const { scope = 'mine', prFilter = 'none' } = params || {};
   try {
-    const bugs = await devopsClient.getOpenBugs({ assignedToMeOnly: scope !== 'all' });
-    return { success: true, bugs: applyPrFilter(bugs, prFilter) };
+    const bugs = await conn.client.getOpenBugs({ assignedToMeOnly: scope !== 'all' });
+    return { success: true, provider: conn.providerId, bugs: applyPrFilter(bugs, prFilter) };
   } catch (err) {
-    return { success: false, error: err.message };
+    return { success: false, provider: conn.providerId, error: err.message };
   }
 });
 
 ipcMain.handle('refresh-workitems', async (_event, params = {}) => {
-  if (!devopsClient) return { success: false, error: 'Not authenticated' };
+  const { conn, error } = connectionOrError(params);
+  if (error) return error;
   const { scope = 'mine', prFilter = 'none' } = params || {};
   try {
-    const items = await devopsClient.getOpenWorkItems({ assignedToMeOnly: scope !== 'all' });
-    return { success: true, items: applyPrFilter(items, prFilter) };
+    const items = await conn.client.getOpenWorkItems({ assignedToMeOnly: scope !== 'all' });
+    return { success: true, provider: conn.providerId, items: applyPrFilter(items, prFilter) };
   } catch (err) {
-    return { success: false, error: err.message };
+    return { success: false, provider: conn.providerId, error: err.message };
   }
 });
 
@@ -562,10 +611,12 @@ ipcMain.handle('start-workitem-action', async (_event, { workItem, repoInfo, age
   return agentRunner.startWorkItemAction(workItem, repoInfo, agent, mdl, { promptFile });
 });
 
-ipcMain.handle('get-repos-for-project', async (_event, project) => {
-  if (!devopsClient) return { success: false, error: 'Not authenticated', repos: [] };
+ipcMain.handle('get-repos-for-project', async (_event, params) => {
+  const { project, provider } = typeof params === 'string' ? { project: params } : (params || {});
+  const { conn, error } = connectionOrError({ provider });
+  if (error) return { ...error, repos: [] };
   try {
-    const repos = await devopsClient.getRepos(project);
+    const repos = await conn.client.getRepos(project);
     return {
       success: true,
       repos: (repos || []).map((r) => ({ id: r.id, name: r.name })),
@@ -677,16 +728,12 @@ function buildTestSpawnEnv() {
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.NODE_INSPECT;
   delete env.NODE_INSPECT_RESUME_ON_START;
-  // Surface the PAT under common conventional names so prompts can
-  // authenticate REST calls without us templating the secret in.
-  // The detail-mode flow runs against real PRs and absolutely needs
-  // this; the test-mode "is the agent working" flow benefits too if
-  // the user asks the agent to ping ADO.
-  if (currentPat) {
-    env.AZURE_DEVOPS_PAT = currentPat;
-    env.AZURE_DEVOPS_EXT_PAT = currentPat;
-    env.SYSTEM_ACCESSTOKEN = currentPat;
-  }
+  // Surface every connected service's token under the conventional names
+  // its prompts reference so the agent can authenticate REST calls without
+  // us templating a secret in. The detail-mode flow runs against real PRs
+  // and needs this; the test-mode flow benefits too if the user asks the
+  // agent to ping a service.
+  for (const conn of connections.values()) Object.assign(env, conn.agentEnv());
   return env;
 }
 
@@ -880,9 +927,10 @@ async function cleanupDetailRun() {
   detailRun = null;
 }
 
-function loadUniversalReviewPrompt() {
-  const p1 = path.join(__dirname, '..', '..', 'resources', 'LGTM_REVIEW_PROMPT.md');
-  const p2 = path.join(process.resourcesPath || '', 'LGTM_REVIEW_PROMPT.md');
+function loadUniversalReviewPrompt(providerId) {
+  const file = getProvider(providerId || 'azure-devops').universalPromptFile;
+  const p1 = path.join(__dirname, '..', '..', 'resources', file);
+  const p2 = path.join(process.resourcesPath || '', file);
   for (const p of [p1, p2]) {
     try { return fs.readFileSync(p, 'utf8'); } catch { /* try next */ }
   }
@@ -901,7 +949,8 @@ function loadRepoPromptIfAny(pr, clonePath) {
 }
 
 function buildWorkItemDetailPrompt({ workItem, details, repoInfo, repoPrompt }) {
-  const stripHtml = (html) => (html || '')
+  const isMarkdown = details.bodyFormat === 'markdown';
+  const stripHtml = (html) => (isMarkdown ? (html || '').trim() : (html || '')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/p>/gi, '\n\n')
     .replace(/<[^>]+>/g, '')
@@ -911,7 +960,7 @@ function buildWorkItemDetailPrompt({ workItem, details, repoInfo, repoPrompt }) 
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/\n{3,}/g, '\n\n')
-    .trim();
+    .trim());
 
   const lines = [];
   if (repoPrompt && repoPrompt.trim()) {
@@ -958,7 +1007,7 @@ function buildPrDetailPrompt({ pr, prDescription, universalPrompt, repoPrompt })
   lines.push('# Pull Request', '');
   lines.push(`- Project: ${pr.project}`);
   lines.push(`- Repo: ${pr.repo}`);
-  lines.push(`- PR ID: !${pr.id}`);
+  lines.push(`- PR ID: ${pr.provider === 'github' ? '#' : '!'}${pr.id}`);
   lines.push(`- Title: ${pr.title || ''}`);
   lines.push(`- Author: ${pr.createdBy || ''}`);
   lines.push(`- Source branch: ${sourceBranch}`);
@@ -980,8 +1029,8 @@ function buildPrDetailPrompt({ pr, prDescription, universalPrompt, repoPrompt })
 }
 
 ipcMain.handle('agent-detail-prepare', async (_event, { target, agentId, model }) => {
-  if (!agentRunner || !agentRunner.cloner) {
-    return { success: false, error: 'Not authenticated yet — set up your PAT first.' };
+  if (!agentRunner || !agentRunner.hasConnection) {
+    return { success: false, error: 'Not connected yet — connect a git service first.' };
   }
   const agent = agentRegistry.get(agentId);
   if (!agent) return { success: false, error: `Unknown agent: ${agentId}` };
@@ -1004,15 +1053,16 @@ ipcMain.handle('agent-detail-prepare', async (_event, { target, agentId, model }
   try {
     if (target.kind === 'pr' && target.pr) {
       const pr = target.pr;
-      const result = await agentRunner.cloner.clone(pr, {});
+      const conn = agentRunner.connectionFor(pr);
+      const result = await conn.cloner.clone(pr, {});
       clonePath = result.clonePath;
       cleanup = result.cleanup;
 
-      const universalPrompt = loadUniversalReviewPrompt();
+      const universalPrompt = loadUniversalReviewPrompt(conn.providerId);
       const repoPrompt = loadRepoPromptIfAny(pr, clonePath);
       let prDescription = '';
       try {
-        const full = await agentRunner.devopsClient.getPullRequest(pr.project, pr.repoId, pr.id);
+        const full = await conn.client.getPullRequest(pr.project, pr.repoId, pr.id);
         prDescription = full.description || '';
       } catch (err) {
         console.warn(`[LGTM] detail-prepare: could not fetch PR description: ${err.message}`);
@@ -1020,14 +1070,15 @@ ipcMain.handle('agent-detail-prepare', async (_event, { target, agentId, model }
       prompt = buildPrDetailPrompt({ pr, prDescription, universalPrompt, repoPrompt });
     } else if (target.kind === 'workItem' && target.workItem && target.repoInfo) {
       const { workItem, repoInfo } = target;
-      const result = await agentRunner.cloner.cloneRepo(repoInfo.project, repoInfo.repo, workItem.id, {});
+      const conn = agentRunner.connectionFor(workItem);
+      const result = await conn.cloner.cloneRepo(repoInfo.project, repoInfo.repo, workItem.id, {});
       clonePath = result.clonePath;
       cleanup = result.cleanup;
 
       // Pull full work-item details for description/repro/etc.
       let details = workItem;
       try {
-        details = await agentRunner.devopsClient.getWorkItemDetails(workItem.id);
+        details = await conn.client.getWorkItemDetails(workItem);
       } catch (err) {
         console.warn(`[LGTM] detail-prepare: could not fetch work item details: ${err.message}`);
       }
@@ -1142,6 +1193,8 @@ ipcMain.handle('agent-detail-cleanup', async () => {
 
 ipcMain.handle('get-settings', () => ({
   orgUrl: config.get('orgUrl'),
+  providerUrls: config.get('providerUrls'),
+  activeProvider: activeProviderId(),
   webhookPort: config.get('webhookPort'),
   promptPath: config.get('promptPath'),
   pollingIntervalMs: config.get('pollingIntervalMs'),
@@ -1190,10 +1243,11 @@ ipcMain.handle('get-prompt-conventions', () => {
 
 // ── IPC: Repo file tree (for autocomplete) ──────────────────────────
 
-ipcMain.handle('get-repo-file-tree', async (_event, { project, repoName }) => {
-  if (!devopsClient) return { success: false, error: 'Not authenticated', files: [] };
+ipcMain.handle('get-repo-file-tree', async (_event, { project, repoName, provider }) => {
+  const { conn, error } = connectionOrError({ provider });
+  if (error) return { ...error, files: [] };
   try {
-    const files = await devopsClient.getRepoFileTree(project, repoName);
+    const files = await conn.client.getRepoFileTree(project, repoName);
     return { success: true, files };
   } catch (err) {
     console.error(`[LGTM] Failed to fetch file tree for ${project}/${repoName}:`, err.message);

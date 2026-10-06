@@ -20,6 +20,9 @@ targets:
     platform: iOS
     sources:
       - path: LGTM
+    # The design-system faces ship inside the bundle (never relied on from
+    # the system). project.yml copies LGTM/Fonts as resources; UIAppFonts
+    # below registers them so Font.ui / Font.code resolve.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: net.codelifter.lgtm
@@ -31,6 +34,15 @@ targets:
       properties:
         CFBundleDisplayName: LGTM
         UILaunchScreen: {}
+        UIAppFonts:
+          - Inter-Regular.ttf
+          - Inter-Medium.ttf
+          - Inter-SemiBold.ttf
+          - Inter-Bold.ttf
+          - JetBrainsMono-Regular.ttf
+          - JetBrainsMono-Medium.ttf
+          - JetBrainsMono-SemiBold.ttf
+          - JetBrainsMono-Bold.ttf
         ITSAppUsesNonExemptEncryption: false
         UISupportedInterfaceOrientations~ipad:
           - UIInterfaceOrientationPortrait

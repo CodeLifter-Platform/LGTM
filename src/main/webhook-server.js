@@ -1,11 +1,19 @@
 /**
  * WebhookServer — Lightweight HTTP server that receives Azure DevOps
- * Service Hook events for real-time PR updates.
+ * Service Hook events and GitHub webhooks for real-time PR updates.
  *
  * Setup in Azure DevOps:
  *   Project Settings → Service Hooks → Create subscription
  *   → Web Hooks → trigger on "Pull request created / updated / merge attempted"
  *   → URL: http://<your-machine>:<port>/webhook
+ *
+ * Setup in GitHub:
+ *   Repo or org Settings → Webhooks → Add webhook
+ *   → Payload URL: http://<your-machine>:<port>/webhook, content type JSON
+ *   → events: Pull requests, Pull request reviews, Issues
+ *
+ * The callback receives the parsed body and the request headers; the
+ * provider registry decides which service an event belongs to.
  *
  * For local dev you can use a tunnel (ngrok, Cloudflare Tunnel, etc.)
  * to expose this port externally.
@@ -16,7 +24,7 @@ const http = require('http');
 class WebhookServer {
   /**
    * @param {number} port       - Port to listen on
-   * @param {function} onEvent  - Callback invoked with each parsed event payload
+   * @param {function} onEvent  - Callback invoked with (payload, headers) for each event
    */
   constructor(port, onEvent) {
     this.port = port;
@@ -42,7 +50,7 @@ class WebhookServer {
         req.on('end', () => {
           try {
             const event = JSON.parse(body);
-            this.onEvent(event);
+            this.onEvent(event, req.headers || {});
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ received: true }));
           } catch (err) {

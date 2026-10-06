@@ -1,0 +1,231 @@
+/* ============================================================
+   LGTM — design tokens (web port of the CodeLifter Design System)
+
+   Source of truth: Platform-Design/tokens/{colors,typography,spacing,effects}.css
+   (sibling repo, github.com/CodeLifter-Platform/Platform-Design). This file is a
+   verbatim port of that token layer in the design system's own CSS notation,
+   plus the @font-face declarations that bundle Inter and JetBrains Mono with
+   the app (the design system references Google Fonts; the harness requires
+   fonts to ship with the app, so the binaries live in ./fonts).
+
+   Rules (Platform-Standards/design/design-system.md):
+     - views reference tokens only; no raw hex outside this file
+     - dark is canonical; light is the design system's light-cool scope,
+       switched by [data-theme="light"] on <html>
+     - [data-density="compact"] tightens control and row padding for this
+       desktop surface
+   Last synced from Platform-Design: 2026-10-06.
+
+   LGTM has no locked per-app accent in Platform-Standards/design/app-accents.md,
+   so it uses the platform brand pair as-is: royal purple --cl-primary and
+   electric cyan --cl-accent. Nothing here invents a hue.
+   ============================================================ */
+
+/* ---- Bundled web fonts (SIL OFL 1.1; licences alongside the files) ---- */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/InterVariable.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/JetBrainsMono-Regular.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./fonts/JetBrainsMono-Medium.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('./fonts/JetBrainsMono-SemiBold.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./fonts/JetBrainsMono-Bold.woff2') format('woff2');
+}
+
+:root {
+  /* ---- Brand scale: royal purple (matches the barbell logo) ---- */
+  --cl-purple-100: #cbb3f8;
+  --cl-purple-200: #b896f5;
+  --cl-purple-300: #a78bfa;
+  --cl-purple-400: #9a68f1;
+  --cl-purple-500: #7c3aed;   /* primary */
+  --cl-purple-600: #6d28d9;
+  --cl-purple-700: #5b21b6;
+
+  /* ---- Brand scale: electric cyan (complementary accent) ---- */
+  --cl-cyan-300: #66e4ff;
+  --cl-cyan-400: #00d4ff;     /* accent */
+  --cl-cyan-600: #0099bb;
+  --cl-cyan-700: #0e7490;
+
+  /* ---- Status hues ---- */
+  --cl-green-500: #34d399;
+  --cl-amber-500: #f5b544;
+  --cl-red-500:   #f2555a;
+
+  /* ---- Dark neutral ramp (canonical) ---- */
+  --cl-ink-950: #0a0a0f;
+  --cl-ink-900: #12121a;
+  --cl-ink-800: #1a1a28;
+  --cl-ink-700: #1e1e2e;
+  --cl-ink-400: #8888a0;
+  --cl-ink-100: #e8e8ed;
+
+  /* ================= Semantic aliases (dark = default) ================= */
+  --cl-bg: var(--cl-ink-950);
+  --cl-surface: var(--cl-ink-900);
+  --cl-surface-hover: var(--cl-ink-800);
+  --cl-border: var(--cl-ink-700);
+  --cl-text: var(--cl-ink-100);
+  --cl-text-muted: var(--cl-ink-400);
+
+  --cl-primary: var(--cl-purple-500);
+  --cl-primary-dim: var(--cl-purple-600);
+  --cl-primary-glow: rgba(124, 58, 237, 0.28);
+  --cl-on-primary: #ffffff;
+  --cl-primary-text: var(--cl-purple-300);
+
+  --cl-accent: var(--cl-cyan-400);
+  --cl-accent-dim: var(--cl-cyan-600);
+  --cl-accent-glow: rgba(0, 212, 255, 0.22);
+  --cl-on-accent: #04121a;
+  --cl-accent-text: var(--cl-cyan-400);
+
+  --cl-secondary: var(--cl-purple-300);
+
+  --cl-success: var(--cl-green-500);
+  --cl-warning: var(--cl-amber-500);
+  --cl-danger: var(--cl-red-500);
+  --cl-success-text: var(--cl-success);
+  --cl-warning-text: var(--cl-warning);
+  --cl-danger-text: var(--cl-danger);
+
+  --cl-grid: rgba(255, 255, 255, 0.04);
+
+  /* ---- Typography (Platform-Design/tokens/typography.css) ---- */
+  --cl-font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --cl-font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --cl-text-display: 3.4rem;
+  --cl-text-h1: 2.5rem;
+  --cl-text-h2: 1.9rem;
+  --cl-text-h3: 1.4rem;
+  --cl-text-lg: 1.2rem;
+  --cl-text-base: 1rem;
+  --cl-text-sm: 0.875rem;
+  --cl-text-xs: 0.75rem;
+
+  --cl-weight-regular: 400;
+  --cl-weight-medium: 500;
+  --cl-weight-semibold: 600;
+  --cl-weight-bold: 700;
+  --cl-weight-black: 800;
+
+  --cl-leading-tight: 1.05;
+  --cl-leading-snug: 1.25;
+  --cl-leading-normal: 1.6;
+
+  --cl-tracking-tight: -0.03em;
+  --cl-tracking-normal: 0;
+  --cl-tracking-wide: 0.06em;
+  --cl-tracking-mono: 0.12em;
+
+  /* ---- Spacing & radius (Platform-Design/tokens/spacing.css) ---- */
+  --cl-space-2xs: 4px;
+  --cl-space-xs: 8px;
+  --cl-space-sm: 12px;
+  --cl-space-md: 16px;
+  --cl-space-lg: 24px;
+  --cl-space-xl: 32px;
+  --cl-space-2xl: 48px;
+  --cl-space-3xl: 64px;
+
+  --cl-radius-sm: 6px;
+  --cl-radius-md: 10px;   /* buttons, inputs */
+  --cl-radius-lg: 16px;   /* cards */
+  --cl-radius-xl: 24px;
+  --cl-radius-full: 9999px;
+
+  --cl-ctrl-py: 0.72rem;
+  --cl-ctrl-px: 1.2rem;
+  --cl-ctrl-fs: 0.95rem;
+  --cl-row-py: 0.85rem;
+
+  --cl-container: 1120px;
+
+  /* ---- Effects (Platform-Design/tokens/effects.css) ---- */
+  --cl-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --cl-shadow-md: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --cl-shadow-lg: 0 20px 50px rgba(0, 0, 0, 0.45);
+
+  --cl-glow-primary: 0 0 28px var(--cl-primary-glow);
+  --cl-glow-primary-strong: 0 0 30px var(--cl-primary-glow), 0 0 60px var(--cl-primary-glow);
+  --cl-glow-accent: 0 0 28px var(--cl-accent-glow);
+
+  --cl-ring: 0 0 0 3px var(--cl-primary-glow);
+
+  --cl-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --cl-dur-fast: 0.2s;
+  --cl-dur: 0.3s;
+}
+
+[data-density="compact"] {
+  --cl-ctrl-py: 0.4rem;
+  --cl-ctrl-px: 0.85rem;
+  --cl-ctrl-fs: 0.85rem;
+  --cl-row-py: 0.45rem;
+}
+
+/* ---- Light: the design system's crisp, cool-neutral canvas ---- */
+[data-theme="light"] {
+  --cl-bg: #f6f7fb;
+  --cl-surface: #ffffff;
+  --cl-surface-hover: #f0f0f8;
+  --cl-border: #e3e3ee;
+  --cl-text: #14141c;
+  --cl-text-muted: #5a5a72;
+
+  --cl-primary: var(--cl-purple-600);
+  --cl-primary-dim: var(--cl-purple-700);
+  --cl-primary-glow: rgba(109, 40, 217, 0.16);
+  --cl-on-primary: #ffffff;
+  --cl-primary-text: var(--cl-purple-600);
+
+  --cl-accent: #0891b2;
+  --cl-accent-dim: var(--cl-cyan-700);
+  --cl-accent-glow: rgba(8, 145, 178, 0.14);
+  --cl-on-accent: #ffffff;
+  --cl-accent-text: var(--cl-cyan-700);
+
+  --cl-secondary: var(--cl-purple-500);
+
+  --cl-success: #059669;
+  --cl-warning: #c2820c;
+  --cl-danger: #dc2f36;
+  --cl-success-text: #046c4e;
+  --cl-warning-text: #8a5a06;
+  --cl-danger-text: #b3202a;
+
+  --cl-grid: rgba(20, 20, 40, 0.05);
+}
+
+@keyframes cl-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.7; }
+}

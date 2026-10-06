@@ -51,6 +51,14 @@ jobs:
       - name: Generate project
         run: xcodegen generate
 
+      # ── Unit tests on the simulator — before any build or archive, so a leg
+      #    never packages what the suite would have rejected ────────────────────
+      - name: Test (simulator)
+        run: |
+          xcodebuild test -project LGTM.xcodeproj -scheme LGTM \
+            -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M4)' \
+            CODE_SIGNING_ALLOWED=NO
+
       # ── Unsigned simulator build — runs when no signing key is configured ──────
       - name: Build (simulator, unsigned)
         if: env.ASC_KEY_ID == ''

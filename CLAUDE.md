@@ -15,16 +15,17 @@
 
 <!-- App-specific rules only. Platform-wide standards live in the harness. -->
 
-LGTM is a cross-platform menu-bar app that lists your open Azure DevOps pull requests and
-runs AI-powered code reviews on them with one click. It is the platform's one
-Electron/Node app; the .NET conventions in the harness do not apply here, but design
-tokens, theming, versioning, and release conventions do.
+LGTM is a cross-platform menu-bar app that lists your open pull requests, bugs and tickets
+from Azure DevOps and GitHub and runs AI-powered agents on them with one click. It is the
+platform's one Electron/Node app; the .NET conventions in the harness do not apply here,
+but design tokens, theming, versioning, and release conventions do.
 
 ## Quick start
 
 ```bash
 npm install
 npm start
+npm test          # node --test over tests/; no Electron needed
 ```
 
 ```bash
@@ -43,3 +44,16 @@ npm run build:mac
   README links when convenient; the org repo is canonical.
 - **Electron, so no `global.json` / `Directory.*.props`.** The .NET conformance check
   skips this repo automatically because it has no root `.sln`.
+- **Design tokens live in `src/renderer/tokens.css`**, a verbatim port of
+  `Platform-Design/tokens/*.css` in the design system's own CSS notation (light is the
+  design system's light-cool scope). `styles.css` references tokens only; `ios/LGTM/Theme.swift`
+  mirrors the same values. Change the port and the mirror in the same commit.
+- **Git services are providers** (`src/main/providers/`). Every PR / work item row carries
+  `provider`; the renderer never branches on the service beyond number prefixes and hint
+  nouns. A new service is one registry entry, a client with the same row shapes, a prompt
+  set under `resources/prompts/<id>/`, and a `token-store.js` entry.
+- **The scenario prompt files are verbatim inputs.** The Azure DevOps set at
+  `resources/prompts/` and the GitHub set in `resources/prompts/github/` differ only in
+  the service-access sections; keep them in step when changing workflow text.
+- **Parity gap, recorded:** the iPad head under `ios/` is Azure DevOps only (no GitHub
+  client, no provider switch). See `..Documentation/LivingSpec.md` → Known gaps.

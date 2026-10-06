@@ -6,7 +6,13 @@
  * Files live in resources/prompts/ in dev and process.resourcesPath/prompts/
  * in a packaged build (see package.json `extraResources`).
  *
- * The four files are read-only inputs — they must not be edited or templated.
+ * One set of files per git service. The Azure DevOps set is the original at
+ * the root of resources/prompts/; every other provider keeps its own copy in
+ * a subfolder named after the provider id (`github/`). A provider's set is
+ * complete or absent — the loader fails fast on a half-set so a missing file
+ * is found at startup, not at dispatch.
+ *
+ * The files are read-only inputs — they must not be edited or templated.
  * The orchestrator only injects required variables under the
  * `## Injected Context` heading.
  */
@@ -15,6 +21,13 @@ const fs = require('fs');
 const path = require('path');
 
 const PREAMBLE_FILE = '00-agent-preambles.md';
+
+// Provider id → subfolder of the prompts dir ('' = the root set).
+const PROMPT_SETS = {
+  'azure-devops': '',
+  github: 'github',
+};
+const DEFAULT_PROVIDER = 'azure-devops';
 
 const SCENARIOS = {
   'pr-review':         { file: '01-pr-review.md',        requiredReportKeys: ['pr_id', 'comments_posted'] },
@@ -72,20 +85,23 @@ function extractFencedPreamble(fileContent, heading) {
 }
 
 class ScenarioPrompts {
-  constructor() {
-    this.promptsDir = resolvePromptsDir();
-    this.preambles = {};       // agentId → string
-    this.scenarios = {};       // scenarioId → string
+  /**
+   * @param {{ promptsDir?: string }} [opts]  Override the prompts directory (tests).
+   */
+  constructor(opts = {}) {
+    this.promptsDir = opts.promptsDir || resolvePromptsDir();
+    this.sets = {};            // providerId → { preambles: {agentId → string}, scenarios: {scenarioId → string} }
     this.loaded = false;
   }
 
-  /**
-   * Read every prompt file from disk. Throws if any file is missing or any
-   * preamble heading is absent. Call this at app startup so failures
-   * surface immediately, not at dispatch time.
-   */
-  loadAll() {
-    const preamblePath = path.join(this.promptsDir, PREAMBLE_FILE);
+  static providers() { return Object.keys(PROMPT_SETS); }
+
+  _loadSet(providerId) {
+    const sub = PROMPT_SETS[providerId];
+    if (sub === undefined) throw new Error(`[LGTM] No prompt set registered for provider "${providerId}"`);
+    const dir = sub ? path.join(this.promptsDir, sub) : this.promptsDir;
+
+    const preamblePath = path.join(dir, PREAMBLE_FILE);
     let preambleContent;
     try {
       preambleContent = fs.readFileSync(preamblePath, 'utf8');
@@ -93,39 +109,56 @@ class ScenarioPrompts {
       throw new Error(`[LGTM] Cannot read preamble file at ${preamblePath}: ${err.message}`);
     }
 
+    const preambles = {};
     for (const [agentId, heading] of Object.entries(AGENT_PREAMBLE_HEADINGS)) {
       const block = extractFencedPreamble(preambleContent, heading);
       if (!block) {
-        throw new Error(`[LGTM] Preamble heading "## ${heading}" not found or has no fenced body in ${PREAMBLE_FILE}`);
+        throw new Error(`[LGTM] Preamble heading "## ${heading}" not found or has no fenced body in ${preamblePath}`);
       }
-      this.preambles[agentId] = block;
+      preambles[agentId] = block;
     }
 
+    const scenarios = {};
     for (const [scenarioId, def] of Object.entries(SCENARIOS)) {
-      const scenarioPath = path.join(this.promptsDir, def.file);
+      const scenarioPath = path.join(dir, def.file);
       try {
-        this.scenarios[scenarioId] = fs.readFileSync(scenarioPath, 'utf8');
+        scenarios[scenarioId] = fs.readFileSync(scenarioPath, 'utf8');
       } catch (err) {
         throw new Error(`[LGTM] Cannot read scenario prompt at ${scenarioPath}: ${err.message}`);
       }
     }
 
-    this.loaded = true;
-    console.log(`[LGTM] Loaded scenario prompts from ${this.promptsDir}`);
+    this.sets[providerId] = { preambles, scenarios, dir };
   }
 
-  getPreamble(agentId) {
+  /**
+   * Read every prompt file for every provider from disk. Throws if any file
+   * is missing or any preamble heading is absent. Call this at app startup
+   * so failures surface immediately, not at dispatch time.
+   */
+  loadAll() {
+    for (const providerId of Object.keys(PROMPT_SETS)) this._loadSet(providerId);
+    this.loaded = true;
+    console.log(`[LGTM] Loaded scenario prompts for ${Object.keys(PROMPT_SETS).join(', ')} from ${this.promptsDir}`);
+  }
+
+  _set(providerId) {
     if (!this.loaded) this.loadAll();
-    const block = this.preambles[agentId];
+    const set = this.sets[providerId || DEFAULT_PROVIDER];
+    if (!set) throw new Error(`[LGTM] No prompt set for provider "${providerId}". Known: ${Object.keys(this.sets).join(', ')}`);
+    return set;
+  }
+
+  getPreamble(agentId, providerId = DEFAULT_PROVIDER) {
+    const block = this._set(providerId).preambles[agentId];
     if (!block) {
       throw new Error(`[LGTM] No preamble block for agent "${agentId}". Add a "## ${AGENT_PREAMBLE_HEADINGS[agentId] || agentId}" section to ${PREAMBLE_FILE} or pick a supported agent.`);
     }
     return block;
   }
 
-  getScenario(scenarioId) {
-    if (!this.loaded) this.loadAll();
-    const body = this.scenarios[scenarioId];
+  getScenario(scenarioId, providerId = DEFAULT_PROVIDER) {
+    const body = this._set(providerId).scenarios[scenarioId];
     if (!body) {
       throw new Error(`[LGTM] Unknown scenario "${scenarioId}". Known: ${Object.keys(SCENARIOS).join(', ')}`);
     }
@@ -146,10 +179,12 @@ class ScenarioPrompts {
    * injected context. This is how the existing layered prompts
    * (LGTM_REVIEW_PROMPT.md, REPO_REVIEW_TEMPLATE.md, existing PR threads)
    * are passed alongside the scenario without being interleaved into it.
+   *
+   * `providerId` picks the prompt set (Azure DevOps by default).
    */
-  buildDispatchPrompt(agentId, scenarioId, contextVars, extraSections = []) {
-    const preamble = this.getPreamble(agentId);
-    const scenario = this.getScenario(scenarioId);
+  buildDispatchPrompt(agentId, scenarioId, contextVars, extraSections = [], providerId = DEFAULT_PROVIDER) {
+    const preamble = this.getPreamble(agentId, providerId);
+    const scenario = this.getScenario(scenarioId, providerId);
 
     const required = this.getRequiredVariables(scenarioId);
     const missing = required.filter((k) => !(k in contextVars) || contextVars[k] == null || contextVars[k] === '');
@@ -258,4 +293,4 @@ class ScenarioPrompts {
   }
 }
 
-module.exports = { ScenarioPrompts, AGENT_PREAMBLE_HEADINGS };
+module.exports = { ScenarioPrompts, AGENT_PREAMBLE_HEADINGS, PROMPT_SETS, SCENARIOS };

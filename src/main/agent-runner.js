@@ -17,8 +17,8 @@ const path = require('path');
 const { AgentRegistry } = require('./agent-registry');
 const { RepoCloner } = require('./repo-cloner');
 const { PromptResolver } = require('./prompt-resolver');
-const { DevOpsClient } = require('./devops-client');
 const { ScenarioPrompts } = require('./scenario-prompts');
+const { getProvider } = require('./providers');
 const {
   downloadInlineImages,
   applySubstitutions,
@@ -28,9 +28,36 @@ const {
 function formatIdentity(user) {
   if (!user) return '';
   const name = user.displayName || user.email || '';
-  const id = user.id || '';
+  const id = user.login ? `@${user.login}` : (user.id || '');
   if (name && id) return `${name} (${id})`;
   return name || id || '';
+}
+
+/**
+ * The universal review rules (Layer A) live next to the scenario prompts and
+ * are per provider too, since they name the service in a few places.
+ */
+function loadUniversalPrompt(providerId) {
+  const file = getProvider(providerId).universalPromptFile;
+  const candidates = [
+    path.join(__dirname, '..', '..', 'resources', file),
+    process.resourcesPath ? path.join(process.resourcesPath, file) : null,
+  ].filter(Boolean);
+  for (const p of candidates) {
+    try { return fs.readFileSync(p, 'utf8'); } catch { /* try next */ }
+  }
+  console.warn(`[LGTM] Could not load ${file} — using minimal fallback`);
+  return '';
+}
+
+/**
+ * Provider-neutral context variables every scenario receives on top of its
+ * required set: which service, and the repository coordinates its API needs.
+ */
+function providerContextVars(conn, project, repo, repoId) {
+  const vars = { PROVIDER: conn.provider.label, REPO_OWNER: project, REPO_NAME: repo };
+  if (repoId) vars.REPO_ID = repoId;
+  return vars;
 }
 
 /**
@@ -40,25 +67,17 @@ function formatIdentity(user) {
  * auggie), making it print "Debugger listening on ws://..." and attach
  * a debugger to itself. Harmless but noisy in the detail panel.
  *
- * If a PAT is provided, surface it under common env-var names the
- * agent prompts reference so REST calls to Azure DevOps can authenticate
- * without us having to template the secret into the prompt body.
+ * `extraEnv` is the connected service's credential under the env-var names
+ * its prompts reference (`Connection.agentEnv()`), so REST calls from the
+ * agent can authenticate without us templating the secret into the prompt.
  */
-function buildSpawnEnv(pat) {
+function buildSpawnEnv(extraEnv) {
   const env = { ...process.env };
   delete env.NODE_OPTIONS;
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.NODE_INSPECT;
   delete env.NODE_INSPECT_RESUME_ON_START;
-  if (pat) {
-    // Multiple names cover common conventions: AZURE_DEVOPS_PAT (our
-    // prompts), AZURE_DEVOPS_EXT_PAT (az-cli ext), SYSTEM_ACCESSTOKEN
-    // (matches ADO Pipelines so prompts copy-pasted from CI examples
-    // also work).
-    env.AZURE_DEVOPS_PAT = pat;
-    env.AZURE_DEVOPS_EXT_PAT = pat;
-    env.SYSTEM_ACCESSTOKEN = pat;
-  }
+  if (extraEnv) Object.assign(env, extraEnv);
   return env;
 }
 
@@ -87,27 +106,45 @@ class AgentRunner {
     this.promptResolver = new PromptResolver(config);
     this.scenarioPrompts = new ScenarioPrompts();
     this.scenarioPrompts.loadAll(); // fail fast at startup if files missing
-    this.cloner = null;       // initialised once we have a PAT
-    this.devopsClient = null;  // for fetching existing threads
-    this.currentUser = null;   // set after auth — used for REVIEWER_/AUTHOR_IDENTITY
+    this.connections = new Map();   // providerId → Connection (with .cloner attached)
     this.activeReviews = new Map(); // key → review object
   }
 
   /**
-   * Set/update the PAT and org URL (called after authentication).
+   * Register a connected service. Each connection gets its own cloner so
+   * reviews against different services can run side by side.
    */
-  setCredentials(pat, orgUrl) {
-    this.cloner = new RepoCloner(pat, orgUrl);
-    this.devopsClient = new DevOpsClient(pat, orgUrl);
+  setConnection(conn) {
+    conn.cloner = new RepoCloner(conn);
+    this.connections.set(conn.providerId, conn);
+  }
+
+  removeConnection(providerId) {
+    this.connections.delete(providerId);
   }
 
   /**
-   * Set the authenticated ADO user. Used to populate REVIEWER_IDENTITY and
-   * AUTHOR_IDENTITY in dispatched scenario prompts.
+   * Set the authenticated user for a service. Used to populate
+   * REVIEWER_IDENTITY and AUTHOR_IDENTITY in dispatched scenario prompts.
    */
-  setIdentity(user) {
-    this.currentUser = user || null;
+  setIdentity(providerId, user) {
+    const conn = this.connections.get(providerId);
+    if (conn) conn.user = user || null;
   }
+
+  /**
+   * The connection a PR / work item belongs to. Rows carry `provider`; a row
+   * without one is from the Azure DevOps era and resolves to that service.
+   */
+  connectionFor(target) {
+    const providerId = (target && target.provider) || 'azure-devops';
+    const conn = this.connections.get(providerId);
+    if (!conn) throw new Error(`Not connected to ${getProvider(providerId).label} — connect it in Settings first.`);
+    return conn;
+  }
+
+  /** True when at least one service is connected (the renderer gates on this). */
+  get hasConnection() { return this.connections.size > 0; }
 
   /**
    * Update review.status and append a timeline entry. The renderer reads
@@ -255,9 +292,8 @@ class AgentRunner {
 
     try {
       // ── Step 1: Clone the repo ─────────────────────────────
-      if (!this.cloner) {
-        throw new Error('Not authenticated — no PAT available for cloning.');
-      }
+      const conn = this.connectionFor(pr);
+      review.provider = conn.providerId;
 
       const onCloneChild = (c) => {
         review.cloneChild = c;
@@ -265,7 +301,7 @@ class AgentRunner {
           try { c.kill('SIGTERM'); } catch { /* ignore */ }
         }
       };
-      const { clonePath, cleanup } = await this.cloner.clone(pr, { onChild: onCloneChild });
+      const { clonePath, cleanup } = await conn.cloner.clone(pr, { onChild: onCloneChild });
       review.cloneChild = null;
       review.cleanup = cleanup;
       review.clonePath = clonePath;
@@ -282,20 +318,7 @@ class AgentRunner {
       // ── Step 2: Build the review prompt ───────────────────────
 
       // Layer A: LGTM universal review prompt (severity system, comment format, re-review rules)
-      const universalPromptPath = path.join(__dirname, '..', '..', 'resources', 'LGTM_REVIEW_PROMPT.md');
-      let universalPrompt = '';
-      try {
-        universalPrompt = fs.readFileSync(universalPromptPath, 'utf8');
-      } catch {
-        // Fallback: try the extraResources path (in packaged app)
-        try {
-          const packagedPath = path.join(process.resourcesPath, 'LGTM_REVIEW_PROMPT.md');
-          universalPrompt = fs.readFileSync(packagedPath, 'utf8');
-        } catch {
-          console.warn('[LGTM] Could not load LGTM_REVIEW_PROMPT.md — using minimal fallback');
-          universalPrompt = '';
-        }
-      }
+      const universalPrompt = loadUniversalPrompt(conn.providerId);
 
       // Layer B: Repo-specific prompt (project context, custom rules)
       const { path: repoPromptPath, source: promptSource } = this.promptResolver.resolve(pr, clonePath);
@@ -315,7 +338,7 @@ class AgentRunner {
       // inline screenshots.
       let prDescription = '';
       try {
-        const full = await this.devopsClient.getPullRequest(pr.project, pr.repoId, pr.id);
+        const full = await conn.client.getPullRequest(pr.project, pr.repoId, pr.id);
         prDescription = full.description || '';
       } catch (err) {
         console.warn(`[LGTM] Could not fetch PR description: ${err.message}`);
@@ -325,7 +348,7 @@ class AgentRunner {
       let existingThreadsSummary = '';
       let threadCommentHtml = []; // collected separately so we can scan for images
       try {
-        const threads = await this.devopsClient.getPrThreads(pr.project, pr.repoId, pr.id);
+        const threads = await conn.client.getPrThreads(pr.project, pr.repoId, pr.id);
         const reviewThreads = threads.filter((t) =>
           t.comments.length > 0 && t.comments[0].commentType === 1
         );
@@ -355,7 +378,7 @@ class AgentRunner {
 
       // Pull inline images from PR description + comment threads.
       const prImages = await this._materializeImages(
-        key, review,
+        conn, key, review,
         [prDescription, ...threadCommentHtml],
         clonePath,
       );
@@ -366,13 +389,14 @@ class AgentRunner {
       const scenarioId = mode === 'resolve' ? 'resolve-comments' : 'pr-review';
       review.scenarioId = scenarioId;
 
-      const identity = formatIdentity(this.currentUser);
+      const identity = formatIdentity(conn.user);
       const contextVars = {
         PR_ID: pr.id,
         PR_URL: pr.webUrl,
         REPO_PATH: clonePath,
         SOURCE_BRANCH: sourceBranch,
         TARGET_BRANCH: targetBranch,
+        ...providerContextVars(conn, pr.project, pr.repo, pr.repoId),
       };
       if (scenarioId === 'pr-review') {
         contextVars.REVIEWER_IDENTITY = identity || 'unknown';
@@ -422,7 +446,7 @@ class AgentRunner {
       }
 
       const prompt = this.scenarioPrompts.buildDispatchPrompt(
-        agentId, scenarioId, contextVars, extraSections,
+        agentId, scenarioId, contextVars, extraSections, conn.providerId,
       );
       review.prompt = prompt;
 
@@ -455,7 +479,7 @@ class AgentRunner {
         cwd: clonePath,
         stdio: [stdinPrompt ? 'pipe' : 'ignore', 'pipe', 'pipe'],
         shell: false,
-        env: buildSpawnEnv(this.cloner && this.cloner.pat),
+        env: buildSpawnEnv(conn.agentEnv()),
       });
       review.child = child;
 
@@ -598,15 +622,15 @@ class AgentRunner {
         webUrl: workItem.webUrl,
         createdBy: '',
         createdDate: '',
+        provider: workItem.provider || 'azure-devops',
       },
     };
     this.activeReviews.set(key, review);
     this._notifyRenderer(key, review);
 
     try {
-      if (!this.cloner) {
-        throw new Error('Not authenticated — no PAT available for cloning.');
-      }
+      const conn = this.connectionFor(workItem);
+      review.provider = conn.providerId;
 
       const onCloneChild = (c) => {
         review.cloneChild = c;
@@ -614,7 +638,7 @@ class AgentRunner {
           try { c.kill('SIGTERM'); } catch { /* ignore */ }
         }
       };
-      const { clonePath, cleanup } = await this.cloner.cloneRepo(
+      const { clonePath, cleanup } = await conn.cloner.cloneRepo(
         repoInfo.project,
         repoInfo.repo,
         workItem.id,
@@ -635,18 +659,16 @@ class AgentRunner {
       // Fetch full work item details (description, repro steps, etc.)
       let details = workItem;
       try {
-        if (this.devopsClient) {
-          details = await this.devopsClient.getWorkItemDetails(workItem.id);
-        }
+        details = await conn.client.getWorkItemDetails(workItem);
       } catch (err) {
         console.warn(`[LGTM] Could not fetch work item details: ${err.message}`);
       }
 
-      // Pull any inline images out of the HTML fields so the agent can
+      // Pull any inline images out of the body fields so the agent can
       // see screenshots, error dialogs, design mockups, etc. via its
       // file-read / vision tools. Skipped silently if nothing matches.
       const wiImages = await this._materializeImages(
-        key, review,
+        conn, key, review,
         [details.description, details.reproSteps, details.systemInfo, details.acceptanceCriteria],
         clonePath,
       );
@@ -655,7 +677,7 @@ class AgentRunner {
       review.scenarioId = scenarioId;
 
       const defaultBranch = detectDefaultBranch(clonePath);
-      const identity = formatIdentity(this.currentUser);
+      const identity = formatIdentity(conn.user);
       const contextVars = {
         WORK_ITEM_ID: details.id || workItem.id,
         WORK_ITEM_URL: details.webUrl || workItem.webUrl,
@@ -663,6 +685,7 @@ class AgentRunner {
         REPO_PATH: clonePath,
         DEFAULT_BRANCH: defaultBranch,
         AUTHOR_IDENTITY: identity || 'unknown',
+        ...providerContextVars(conn, repoInfo.project, repoInfo.repo, repoInfo.repoId),
       };
 
       const extraSections = [
@@ -692,7 +715,7 @@ class AgentRunner {
       }
 
       const prompt = this.scenarioPrompts.buildDispatchPrompt(
-        agentId, scenarioId, contextVars, extraSections,
+        agentId, scenarioId, contextVars, extraSections, conn.providerId,
       );
       review.prompt = prompt;
 
@@ -718,7 +741,7 @@ class AgentRunner {
         cwd: clonePath,
         stdio: [stdinPrompt ? 'pipe' : 'ignore', 'pipe', 'pipe'],
         shell: false,
-        env: buildSpawnEnv(this.cloner && this.cloner.pat),
+        env: buildSpawnEnv(conn.agentEnv()),
       });
       review.child = child;
 
@@ -820,9 +843,9 @@ class AgentRunner {
   }
 
   /**
-   * Scan a list of HTML blobs (work-item description, repro steps, PR
-   * description, comment thread bodies, …) for inline `<img>` tags
-   * pointing at the configured DevOps org, download each one into
+   * Scan a list of text blobs (work-item description, repro steps, PR
+   * description, comment thread bodies, …) for inline images hosted by
+   * the connected service, download each one into
    * `<clonePath>/.lgtm-attachments/`, and surface the result as a
    * substitution map plus a downloaded list. Surfaces a one-line diag
    * in the detail panel so the user can see what was pulled (or why
@@ -832,12 +855,13 @@ class AgentRunner {
    * callers can dereference `.substitutions` / `.downloaded`
    * unconditionally.
    */
-  async _materializeImages(key, review, htmlBlobs, clonePath) {
+  async _materializeImages(conn, key, review, htmlBlobs, clonePath) {
     const empty = { dir: '', downloaded: [], skipped: [], substitutions: new Map() };
-    if (!this.devopsClient) return empty;
+    if (!conn || !conn.client) return empty;
     try {
       const result = await downloadInlineImages(htmlBlobs, {
-        devopsClient: this.devopsClient,
+        client: conn.client,
+        hosts: conn.attachmentHosts,
         clonePath,
         logger: (line) => console.log(`[LGTM] attachments: ${line}`),
       });
@@ -849,7 +873,7 @@ class AgentRunner {
         const reasons = result.skipped.map((s) => s.reason).filter(Boolean);
         const summary = reasons.length > 0 ? ` (${[...new Set(reasons)].slice(0, 2).join('; ')})` : '';
         this._pushDiag(key, review,
-          `[LGTM] Skipped ${result.skipped.length} non-DevOps image link(s)${summary}`);
+          `[LGTM] Skipped ${result.skipped.length} image link(s) not hosted by ${conn.label}${summary}`);
       }
       return result;
     } catch (err) {
@@ -861,7 +885,9 @@ class AgentRunner {
 
   _renderWorkItemDetails(details, repoInfo, imageSubs = null) {
     const subbed = (html) => (imageSubs ? applySubstitutions(html || '', imageSubs) : (html || ''));
-    const stripHtml = (html) => subbed(html)
+    // GitHub issue bodies are markdown already; only HTML fields get stripped.
+    const isMarkdown = details.bodyFormat === 'markdown';
+    const stripHtml = (html) => (isMarkdown ? subbed(html).trim() : subbed(html)
       .replace(/<br\s*\/?>/gi, '\n')
       .replace(/<\/p>/gi, '\n\n')
       .replace(/<[^>]+>/g, '')
@@ -871,7 +897,7 @@ class AgentRunner {
       .replace(/&gt;/g, '>')
       .replace(/&quot;/g, '"')
       .replace(/\n{3,}/g, '\n\n')
-      .trim();
+      .trim());
 
     const parts = [
       `Project: ${details.project || repoInfo.project}`,
@@ -955,6 +981,7 @@ class AgentRunner {
     for (const [key, review] of this.activeReviews) {
       result[key] = {
         status: review.status,
+        provider: review.provider || null,
         agentId: review.agentId,
         model: review.model || null,
         mode: review.mode || null,
@@ -992,6 +1019,7 @@ class AgentRunner {
     return {
       key,
       status: review.status,
+      provider: review.provider || null,
       agentId: review.agentId,
       model: review.model || null,
       mode: review.mode || null,
@@ -1050,6 +1078,7 @@ class AgentRunner {
       windows[0].webContents.send('review-update', {
         key,
         status: review.status,
+        provider: review.provider || null,
         agentId: review.agentId,
         mode: review.mode || null,
         pr: review.pr,
