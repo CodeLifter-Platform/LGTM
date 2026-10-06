@@ -1,44 +1,62 @@
 name: Build & Release
 
+# Versions come from git tags (Platform-Standards/process/versioning-ci.md):
+#
+#   merge into main        → nothing heavy runs here (public repo, see cost model);
+#                            the version job prints what the next pre-release would be
+#   dispatch on main       → patch + 1, `-pre`, signed build, tag, GitHub prerelease,
+#                            Pre-releases README row  (same as scripts/release-local.sh)
+#   dispatch elsewhere     → artifact-only build, X.Y.Z-pre.<run>+<sha>, never released
+#   RELEASE MINOR / MAJOR  → rebuild the newest -pre commit at the release version,
+#                            tag that commit, GitHub release, Releases README row
+#
+# BASE_VERSION and RELEASE_LEVEL are retired. Requires .github/scripts/next-version.sh.
+
 on:
   push:
-    branches: ['**']       # Cheap path: version job only
+    branches: ['**']       # Cheap path: version + tests only
   pull_request:
     branches: [main]       # Same cheap path for PRs
   workflow_dispatch:        # Full pipeline (mac + windows + release) on demand
 
+  # ── Called by the RELEASE MINOR / RELEASE MAJOR buttons ──────────
+  # The buttons REBUILD at the pre-release's commit with the release version compiled in,
+  # rather than re-uploading the pre-release's binaries. Same source, correct version.
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit/tag to build. Empty = the triggering commit.
+        type: string
+        default: ''
+      version:
+        description: Exact version to build. Empty = derive from tags.
+        type: string
+        default: ''
+      is_prerelease:
+        type: boolean
+        default: true
+      promoted_from:
+        description: The pre-release tag this release was rebuilt from.
+        type: string
+        default: ''
+
 # ── Cost model ────────────────────────────────────────────────────
-# macOS runners bill at 10x and Windows at 2x, so pushes/PRs run ONLY the
-# ubuntu jobs (version + the Node test suite with coverage; fits in the
-# org's free included minutes). The heavy build/release jobs run on manual
-# dispatch — day-to-day releases happen for free from a dev Mac via
-# scripts/release-local.sh. Every build leg runs the suite on its own OS
-# before it packages (Platform-Standards/process/testing.md).
+# This repo is PUBLIC, so every runner is GitHub-hosted: macOS bills at 10x and
+# Windows at 2x. Pushes and PRs therefore run ONLY the ubuntu jobs (version +
+# the Node test suite with coverage). The heavy build/release legs run on manual
+# dispatch and from the release buttons; day-to-day pre-releases happen for free
+# from a dev Mac via scripts/release-local.sh. Every build leg runs the suite on
+# its own OS before it packages (Platform-Standards/process/testing.md).
 # ──────────────────────────────────────────────────────────────────
 
 permissions:
-  contents: write          # Needed to create releases, tags, and push version commits
-
-# ── Version strategy ──────────────────────────────────────────────
-#
-#   BASE_VERSION  → GitHub Actions variable (e.g. "1.6")
-#                   Set in repo Settings → Variables → Actions
-#   PATCH         → GITHUB_RUN_NUMBER (auto-increments every run)
-#   RELEASE_LEVEL → repo variable: "alpha" | "beta" | "rc" | "" / unset = stable
-#                   (capability only — LGTM ships stable, so leave it unset)
-#
-#   main branch:    1.6.1, 1.6.2, 1.6.3 …  (clean releases)
-#                   1.6.4-beta              (RELEASE_LEVEL=beta → GitHub prerelease)
-#   other branches: 1.6.1-pre.42+abc1234    (artifact-only, never released)
-#
-# To bump minor/major:
-#   1. Go to Settings → Secrets and variables → Actions → Variables
-#   2. Change BASE_VERSION (e.g. "1.7" or "2.0")
-#   3. Next release becomes 1.7.<next> etc.
-# ──────────────────────────────────────────────────────────────────
+  contents: write          # releases, tags, README bump
 
 jobs:
-  # ── Generate version number ────────────────────────────────────
+  # ── Compute version (the platform contract) ─────────────────────
+  # Derived from git tags, so it can never drift from what was actually published.
+  # fetch-depth: 0 is REQUIRED — a shallow clone has no tags and the version silently
+  # restarts at 0.0.1-pre.
   version:
     runs-on: ubuntu-latest
     outputs:
@@ -46,49 +64,70 @@ jobs:
       version_tag: ${{ steps.semver.outputs.version_tag }}
       is_release: ${{ steps.semver.outputs.is_release }}
       is_prerelease: ${{ steps.semver.outputs.is_prerelease }}
+      # The commit every build job checks out, and the commit the tag will point at.
+      build_sha: ${{ steps.semver.outputs.build_sha }}
+      promoted_from: ${{ inputs.promoted_from }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.ref }}     # empty on push/dispatch = the triggering commit
+
       - name: Generate semantic version
         id: semver
+        env:
+          MAJOR_PIN: ${{ vars.MAJOR_PIN }}     # only for repos tracking an upstream major
         run: |
-          BASE="${{ vars.BASE_VERSION || '1.0' }}"
-          LEVEL="${{ vars.RELEASE_LEVEL || '' }}"
-          PATCH="${{ github.run_number }}"
-          SHORT_SHA="${GITHUB_SHA:0:7}"
-          IS_MAIN="${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}"
+          git fetch --tags --force --quiet
+          echo "build_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-          if [ "$IS_MAIN" = "true" ]; then
-            if [ -n "$LEVEL" ]; then
-              VERSION="${BASE}.${PATCH}-${LEVEL}"
-              IS_PRERELEASE="true"
-            else
-              VERSION="${BASE}.${PATCH}"
-              IS_PRERELEASE="false"
-            fi
-            IS_RELEASE="true"
-          else
-            VERSION="${BASE}.${PATCH}-pre.${GITHUB_RUN_NUMBER}+${SHORT_SHA}"
-            IS_RELEASE="false"
-            IS_PRERELEASE="true"
+          # A release button passes the version in — it has already been computed against
+          # the tags, and the whole point is to compile THAT version into these binaries.
+          if [ -n "${{ inputs.version }}" ]; then
+            {
+              echo "version=${{ inputs.version }}"
+              echo "version_tag=v${{ inputs.version }}"
+              echo "is_release=true"
+              echo "is_prerelease=${{ inputs.is_prerelease }}"
+            } >> "$GITHUB_OUTPUT"
+            echo "### Version: \`${{ inputs.version }}\` (release rebuild of ${{ inputs.promoted_from }})" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
 
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "version_tag=v${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "is_release=$IS_RELEASE" >> "$GITHUB_OUTPUT"
-          echo "is_prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
-          {
-            echo "### Version: \`${VERSION}\`"
-            echo "Release: ${IS_RELEASE} · Prerelease: ${IS_PRERELEASE}"
-          } >> "$GITHUB_STEP_SUMMARY"
+          # Public-repo variant of the contract: a merge into main cannot publish because
+          # the build legs are dispatch-only, so the pre-release is produced by a
+          # workflow_dispatch ON main (or by scripts/release-local.sh), not by the push.
+          IS_MAIN="${{ github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' }}"
+          if [ "$IS_MAIN" = "true" ]; then
+            # The next patch as a signed pre-release.
+            ./.github/scripts/next-version.sh prerelease
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+            echo "### Version: \`$(./.github/scripts/next-version.sh prerelease)\` (pre-release)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            # Branch, PR and push builds are artifact-only and never released.
+            NEXT="$(./.github/scripts/next-version.sh prerelease)"
+            SHORT_SHA="${GITHUB_SHA:0:7}"
+            {
+              echo "version=${NEXT}.${GITHUB_RUN_NUMBER}+${SHORT_SHA}"
+              echo "version_tag=v${NEXT}.${GITHUB_RUN_NUMBER}+${SHORT_SHA}"
+              echo "is_release=false"
+              echo "is_prerelease=true"
+            } >> "$GITHUB_OUTPUT"
+            echo "### Version: \`${NEXT}.${GITHUB_RUN_NUMBER}+${SHORT_SHA}\` (not released; next pre-release would be \`${NEXT}\`)" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # ── Tests (ubuntu, every push and PR) ─────────────────────────
-  # The main-process modules import without Electron, so the suite runs on
-  # plain Node. Coverage goes to the job summary as a gap finder, never a
-  # target (Platform-Standards/process/testing.md).
+  # The main-process modules import without Electron, so the suite runs on plain
+  # Node. Coverage goes to the job summary as a gap finder, never a target
+  # (Platform-Standards/process/testing.md). Tests re-run on a release rebuild too.
   test:
+    needs: version
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.build_sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -114,16 +153,21 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # ── macOS build (dispatch-only: macOS minutes bill 10x) ────────
+  # ── macOS build (dispatch and release buttons only: macOS bills 10x) ──
+  # EVERY build job checks out needs.version.outputs.build_sha, not the default ref: on a
+  # release rebuild that is the pre-release's commit, and a defaulted checkout would
+  # silently build main's HEAD instead.
   build-mac:
     if: github.event_name == 'workflow_dispatch'
-    needs: version
+    needs: [version, test]
     runs-on: macos-latest
     env:
       APP_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.build_sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -170,16 +214,18 @@ jobs:
           path: dist/latest-mac.yml
           if-no-files-found: warn
 
-  # ── Windows build (dispatch-only: Windows minutes bill 2x) ─────
+  # ── Windows build (dispatch and release buttons only: Windows bills 2x) ──
   build-windows:
     if: github.event_name == 'workflow_dispatch'
-    needs: version
+    needs: [version, test]
     runs-on: windows-latest
     env:
       APP_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.build_sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -199,6 +245,9 @@ jobs:
 
       - name: Build Windows installer
         run: npx electron-builder --win --publish never
+        # Windows signing: no identity yet. The intended route is Azure Artifact
+        # Signing (Platform-Standards/process/versioning-ci.md → Signing); when it
+        # exists, sign here only if its secrets are present, never fail without them.
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -214,43 +263,27 @@ jobs:
           path: dist/latest.yml
           if-no-files-found: warn
 
-  # ── Release (dispatch on main only) ────────────────────────────
+  # ── Release: pre-release from a dispatch on main, full release from a button ──
   release:
-    if: github.event_name == 'workflow_dispatch' && needs.version.outputs.is_release == 'true'
+    if: ${{ needs.version.outputs.is_release == 'true' }}
     needs: [version, build-mac, build-windows]
     runs-on: ubuntu-latest
     env:
       APP_VERSION: ${{ needs.version.outputs.version }}
       VERSION_TAG: ${{ needs.version.outputs.version_tag }}
+      BUILD_SHA: ${{ needs.version.outputs.build_sha }}
+      PROMOTED_FROM: ${{ needs.version.outputs.promoted_from }}
+      IS_PRERELEASE: ${{ needs.version.outputs.is_prerelease }}
     steps:
+      # NOTE: main, deliberately — NOT build_sha. The README row and the commit belong on
+      # main even when the artifacts were rebuilt from an older commit. The tag is what
+      # points at build_sha.
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: main
+          fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Stamp version into package.json
-        run: npm version "$APP_VERSION" --no-git-tag-version --allow-same-version
-
-      - name: Update release history in README
-        run: |
-          RELEASE_DATE=$(date -u +"%Y-%m-%d")
-          REPO_URL="https://github.com/CodeLifterIO/LGTM"
-          NEW_ROW="| ${VERSION_TAG} | ${RELEASE_DATE} | [dmg](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-arm64.dmg) · [zip](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-arm64.zip) | [installer](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-Setup.exe) · [portable](${REPO_URL}/releases/download/${VERSION_TAG}/LGTM-Portable.exe) | [Release notes](${REPO_URL}/releases/tag/${VERSION_TAG}) |"
-          awk -v row="$NEW_ROW" '/\|[-]+\|[-]+\|[-]+\|[-]+\|[-]+\|/{print; print row; next} {print}' README.md > README.tmp && mv README.tmp README.md
-
-      - name: Commit version bump
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json README.md
-          git diff --cached --quiet || git commit -m "chore: bump version to ${APP_VERSION} [skip ci]"
-          git tag "$VERSION_TAG"
-          git push origin main --tags
 
       - name: Download macOS artifacts
         uses: actions/download-artifact@v4
@@ -281,10 +314,56 @@ jobs:
       - name: List release files
         run: ls -lhR dist/
 
+      - name: Record it in the right table
+        run: |
+          RELEASE_DATE=$(date -u +"%Y-%m-%d")
+          REPO_URL="${{ github.server_url }}/${{ github.repository }}"
+          SHORT_SHA="${BUILD_SHA:0:7}"
+          DL="${REPO_URL}/releases/download/${VERSION_TAG}"
+
+          # Pre-releases record the commit; releases record the pre-release they came from.
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            ANCHOR="<!-- prereleases:insert -->"
+            PROVENANCE="[\`${SHORT_SHA}\`](${REPO_URL}/commit/${BUILD_SHA})"
+          else
+            ANCHOR="<!-- releases:insert -->"
+            PROVENANCE="rebuilt from ${PROMOTED_FROM} ([\`${SHORT_SHA}\`](${REPO_URL}/commit/${BUILD_SHA}))"
+          fi
+          DOWNLOADS="[dmg](${DL}/LGTM-arm64.dmg) · [zip](${DL}/LGTM-arm64.zip) · [installer](${DL}/LGTM-Setup.exe) · [portable](${DL}/LGTM-Portable.exe)"
+          ROW="| ${VERSION_TAG} | ${RELEASE_DATE} | ${DOWNLOADS} | ${PROVENANCE} | [Release notes](${REPO_URL}/releases/tag/${VERSION_TAG}) |"
+
+          if ! grep -qF "$ANCHOR" README.md; then
+            echo "::error::README.md has no ${ANCHOR} anchor. Copy both tables from"
+            echo "::error::Platform-Standards/templates/README-tables.md."
+            exit 1
+          fi
+
+          # Match the anchor line EXACTLY. "releases:insert" is a substring of
+          # "prereleases:insert", so a loose regex writes the row into both tables. And
+          # never key off a dash separator: two tables with the same column count are
+          # indistinguishable that way.
+          awk -v row="$ROW" -v anchor="$ANCHOR" '
+            $0 == anchor        { print; inblock=1; next }
+            inblock && /^\|---/ { print; print row; inblock=0; next }
+            { print }
+          ' README.md > README.tmp && mv README.tmp README.md
+
+      - name: Commit release bump and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git diff --cached --quiet || git commit -m "chore: release ${APP_VERSION} [skip ci]"
+          # Tag the commit that was BUILT, not main's HEAD — on a release rebuild those
+          # differ, and a tag pointing at unbuilt code is a lie about what shipped.
+          git tag "$VERSION_TAG" "$BUILD_SHA"
+          git push origin main --tags
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.VERSION_TAG }}
+          target_commitish: ${{ env.BUILD_SHA }}
           name: "LGTM ${{ env.VERSION_TAG }}"
           draft: false
           prerelease: ${{ needs.version.outputs.is_prerelease == 'true' }}

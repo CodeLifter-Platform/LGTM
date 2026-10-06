@@ -13,8 +13,9 @@ tokens, theming, versioning, and release conventions do.
 
 ## Status
 
-**Shipping.** `BASE_VERSION` 1.6 — the most mature app on the platform, and the only one
-past the 0.9 line. This repo is **public**.
+**Shipping.** Latest full release `v1.6.0`; the next pre-release is `1.6.1-pre`. The
+most mature app on the platform, and the only one past the 0.9 line. This repo is
+**public**.
 
 ## Features
 
@@ -145,6 +146,18 @@ only the cheap ubuntu jobs (version + tests). Day-to-day releases happen for fre
 dev Mac via `scripts/release-local.sh`. That is the documented public-repo pattern, not a
 deviation.
 
+## Versioning and releases
+
+`major.minor.patch` **derived from git tags** by `.github/scripts/next-version.sh` (the
+platform template), never from a repo variable. A pre-release is patch + 1 with a `-pre`
+suffix, tagged on the built commit and published as a GitHub prerelease with a
+Pre-releases README row; the **RELEASE MINOR** / **RELEASE MAJOR** buttons
+(`release-minor.yml`, `release-major.yml` → `promote.yml`) rebuild the newest pre-release's
+commit at the release version and add a Releases row. Because the heavy legs are
+dispatch-only here, the pre-release is cut by a dispatch on `main` or by
+`scripts/release-local.sh` rather than by the merge itself. Full detail:
+[`RELEASEME.md`](../RELEASEME.md).
+
 ## Known gaps
 
 - **The iPad head (`ios/`) is Azure DevOps only.** It is a read-only companion viewer that
@@ -159,12 +172,6 @@ deviation.
   a targeted fix for a problem plain in the source, but nobody has watched it run. Electron
   under emulation on the Apple Silicon dev host crashes before it can be checked.
 - **Tray behaviour on Linux is untested** across GNOME and KDE.
-- **Versioning is still on the retired `BASE_VERSION` + run-number scheme**; the harness
-  wants tag-derived versions (`process/versioning-ci.md`). Flagged by the conformance
-  checker, not changed here.
-- **README badges and download links still point at `CodeLifterIO/LGTM`**, the old
-  user-owned location, while the repo lives under the org. The update feed itself was
-  fixed; the README links were not.
 - **`docs/` is the GitHub Pages source** (`main//docs`, serving
   `codelifter-platform.github.io/LGTM`). It is a landing page, not documentation, and must
   not be renamed — doing so would take the published site down. Only

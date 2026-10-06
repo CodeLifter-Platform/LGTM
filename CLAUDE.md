@@ -35,13 +35,12 @@ npm run build:mac
 ## App-specific notes
 
 - **This repo is PUBLIC**, and its cost model reflects that: pushes and PRs run only the
-  ubuntu version job, while the macOS (10×) and Windows (2×) builds are
-  `workflow_dispatch`-only. Day-to-day releases happen for free from a dev Mac via
-  `scripts/release-local.sh`. This is the documented public-repo pattern in
-  `Platform-Standards/process/versioning-ci.md`, not a deviation.
-- **Badges and download links still point at `CodeLifterIO/LGTM`** (the old user-owned
-  location) while the repo itself lives under the `CodeLifter-Platform` org. Fix the
-  README links when convenient; the org repo is canonical.
+  ubuntu version + test jobs, while the macOS (10×) and Windows (2×) builds are
+  `workflow_dispatch`-only. Versions derive from git tags (`.github/scripts/next-version.sh`);
+  the one departure from the platform default is that a merge into `main` builds nothing,
+  so the pre-release is cut by a dispatch on `main` or by `scripts/release-local.sh`, and
+  the RELEASE MINOR / MAJOR buttons promote it. See `RELEASEME.md`. This is the documented
+  public-repo pattern in `Platform-Standards/process/versioning-ci.md`, not a deviation.
 - **Electron, so no `global.json` / `Directory.*.props`.** The .NET conformance check
   skips this repo automatically because it has no root `.sln`.
 - **Design tokens live in `src/renderer/tokens.css`**, a verbatim port of

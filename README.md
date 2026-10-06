@@ -9,9 +9,9 @@ A cross-platform menu bar app that lists your open pull requests, bugs and ticke
 
 ## Downloads
 
-LGTM publishes **stable** releases and **version-less asset names**, so the direct links
-below always resolve to the newest build. Most other CodeLifter apps cannot do this: they
-are on `RELEASE_LEVEL=beta`, and GitHub never treats a prerelease as "latest".
+Asset names are version-less, so the direct links below always resolve to the newest
+**full release**. Pre-releases are marked as such on GitHub, which `releases/latest`
+skips, and the in-app updater ignores them too.
 
 ### Download Latest
 
@@ -20,22 +20,38 @@ are on `RELEASE_LEVEL=beta`, and GitHub never treats a prerelease as "latest".
 | **macOS (Apple Silicon)** | [LGTM-arm64.dmg](https://github.com/CodeLifter-Platform/LGTM/releases/latest/download/LGTM-arm64.dmg) | [LGTM-arm64.zip](https://github.com/CodeLifter-Platform/LGTM/releases/latest/download/LGTM-arm64.zip) |
 | **Windows** | [LGTM-Setup.exe](https://github.com/CodeLifter-Platform/LGTM/releases/latest/download/LGTM-Setup.exe) | [LGTM-Portable.exe](https://github.com/CodeLifter-Platform/LGTM/releases/latest/download/LGTM-Portable.exe) |
 
-> **Note:** The app is not code-signed yet. On macOS, right-click → Open to bypass Gatekeeper. On Windows, click "More info" → "Run anyway" in SmartScreen.
+> **Note:** On macOS, right-click → Open if Gatekeeper objects to an unnotarized build. On Windows, click "More info" → "Run anyway" in SmartScreen.
 
-## Release History
+## Releases
 
-| Version | Date | macOS | Windows | Notes |
-|---------|------|-------|---------|-------|
-| v0.5.58 | 2026-05-13 | [dmg](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.58/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.58/LGTM-arm64.zip) | [installer](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.58/LGTM-Setup.exe) · [portable](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.58/LGTM-Portable.exe) | [Release notes](https://github.com/CodeLifter-Platform/LGTM/releases/tag/v0.5.58) |
-| v0.5.54 | 2026-05-13 | [dmg](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.54/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.54/LGTM-arm64.zip) | [installer](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.54/LGTM-Setup.exe) · [portable](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.54/LGTM-Portable.exe) | [Release notes](https://github.com/CodeLifter-Platform/LGTM/releases/tag/v0.5.54) |
-| v0.5.39 | 2026-05-13 | [dmg](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.39/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.39/LGTM-arm64.zip) | [installer](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.39/LGTM-Setup.exe) · [portable](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.39/LGTM-Portable.exe) | [Release notes](https://github.com/CodeLifter-Platform/LGTM/releases/tag/v0.5.39) |
-| v0.5.25 | 2026-04-29 | [dmg](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.25/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.25/LGTM-arm64.zip) | [installer](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.25/LGTM-Setup.exe) · [portable](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.25/LGTM-Portable.exe) | [Release notes](https://github.com/CodeLifter-Platform/LGTM/releases/tag/v0.5.25) |
-| v0.5.23 | 2026-04-28 | [dmg](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.23/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.23/LGTM-arm64.zip) | [installer](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.23/LGTM-Setup.exe) · [portable](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.23/LGTM-Portable.exe) | [Release notes](https://github.com/CodeLifter-Platform/LGTM/releases/tag/v0.5.23) |
-| v0.5.22 | 2026-04-26 | [dmg](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.22/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.22/LGTM-arm64.zip) | [installer](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.22/LGTM-Setup.exe) · [portable](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.22/LGTM-Portable.exe) | [Release notes](https://github.com/CodeLifter-Platform/LGTM/releases/tag/v0.5.22) |
-| v0.5.21 | 2026-04-26 | [dmg](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.21/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.21/LGTM-arm64.zip) | [installer](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.21/LGTM-Setup.exe) · [portable](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.21/LGTM-Portable.exe) | [Release notes](https://github.com/CodeLifter-Platform/LGTM/releases/tag/v0.5.21) |
-| v0.5.8 | 2026-04-13 | [dmg](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.8/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.8/LGTM-arm64.zip) | [installer](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.8/LGTM-Setup.exe) · [portable](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.8/LGTM-Portable.exe) | [Release notes](https://github.com/CodeLifter-Platform/LGTM/releases/tag/v0.5.8) |
-| v0.5.7 | 2026-04-13 | [dmg](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.7/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.7/LGTM-arm64.zip) | [installer](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.7/LGTM-Setup.exe) · [portable](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.7/LGTM-Portable.exe) | [Release notes](https://github.com/CodeLifter-Platform/LGTM/releases/tag/v0.5.7) |
-<!-- RELEASE_TABLE_MARKER -->
+Cut deliberately with the **RELEASE MINOR** / **RELEASE MAJOR** buttons in Actions (or
+`scripts/release-local.sh minor|major`). Each one rebuilds a tested pre-release's commit
+with the release version compiled in. Versions derive from git tags; see
+[RELEASEME.md](RELEASEME.md).
+
+<!-- releases:insert -->
+| Version | Date | Downloads | Rebuilt from | Notes |
+|---|---|---|---|---|
+| v0.5.58 | 2026-05-13 | [dmg](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.58/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.58/LGTM-arm64.zip) · [installer](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.58/LGTM-Setup.exe) · [portable](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.58/LGTM-Portable.exe) | — | [Release notes](https://github.com/CodeLifter-Platform/LGTM/releases/tag/v0.5.58) |
+| v0.5.54 | 2026-05-13 | [dmg](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.54/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.54/LGTM-arm64.zip) · [installer](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.54/LGTM-Setup.exe) · [portable](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.54/LGTM-Portable.exe) | — | [Release notes](https://github.com/CodeLifter-Platform/LGTM/releases/tag/v0.5.54) |
+| v0.5.39 | 2026-05-13 | [dmg](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.39/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.39/LGTM-arm64.zip) · [installer](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.39/LGTM-Setup.exe) · [portable](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.39/LGTM-Portable.exe) | — | [Release notes](https://github.com/CodeLifter-Platform/LGTM/releases/tag/v0.5.39) |
+| v0.5.25 | 2026-04-29 | [dmg](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.25/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.25/LGTM-arm64.zip) · [installer](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.25/LGTM-Setup.exe) · [portable](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.25/LGTM-Portable.exe) | — | [Release notes](https://github.com/CodeLifter-Platform/LGTM/releases/tag/v0.5.25) |
+| v0.5.23 | 2026-04-28 | [dmg](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.23/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.23/LGTM-arm64.zip) · [installer](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.23/LGTM-Setup.exe) · [portable](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.23/LGTM-Portable.exe) | — | [Release notes](https://github.com/CodeLifter-Platform/LGTM/releases/tag/v0.5.23) |
+| v0.5.22 | 2026-04-26 | [dmg](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.22/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.22/LGTM-arm64.zip) · [installer](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.22/LGTM-Setup.exe) · [portable](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.22/LGTM-Portable.exe) | — | [Release notes](https://github.com/CodeLifter-Platform/LGTM/releases/tag/v0.5.22) |
+| v0.5.21 | 2026-04-26 | [dmg](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.21/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.21/LGTM-arm64.zip) · [installer](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.21/LGTM-Setup.exe) · [portable](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.21/LGTM-Portable.exe) | — | [Release notes](https://github.com/CodeLifter-Platform/LGTM/releases/tag/v0.5.21) |
+| v0.5.8 | 2026-04-13 | [dmg](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.8/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.8/LGTM-arm64.zip) · [installer](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.8/LGTM-Setup.exe) · [portable](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.8/LGTM-Portable.exe) | — | [Release notes](https://github.com/CodeLifter-Platform/LGTM/releases/tag/v0.5.8) |
+| v0.5.7 | 2026-04-13 | [dmg](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.7/LGTM-arm64.dmg) · [zip](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.7/LGTM-arm64.zip) · [installer](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.7/LGTM-Setup.exe) · [portable](https://github.com/CodeLifter-Platform/LGTM/releases/download/v0.5.7/LGTM-Portable.exe) | — | [Release notes](https://github.com/CodeLifter-Platform/LGTM/releases/tag/v0.5.7) |
+
+## Pre-releases
+
+Patch + 1 per cut, signed, marked as a prerelease on GitHub. On this public repo they are
+cut by a `workflow_dispatch` on `main` or by `scripts/release-local.sh`, not by the merge
+itself (the macOS and Windows legs are dispatch-only).
+
+<!-- prereleases:insert -->
+| Version | Date | Downloads | Commit | Notes |
+|---|---|---|---|---|
+
 
 ## Features
 

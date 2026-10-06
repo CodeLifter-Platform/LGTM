@@ -1,0 +1,27 @@
+# RELEASE MINOR — the button.
+#
+# Promotes the newest pre-release to a full release: minor + 1, patch -> 0.
+# 0.5.14-pre  ->  0.6.0
+#
+# It REBUILDS the pre-release's commit with the release version compiled in, so the shipped
+# binaries actually report 0.6.0 rather than the pre-release version. Same source,
+# correct version — see promote.yml for what that costs.
+#
+# workflow_dispatch requires write access, so this button is not available to forks or
+# read-only collaborators. For a stricter gate, add an `environment:` with required
+# reviewers to the job below.
+
+name: RELEASE MINOR
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    uses: ./.github/workflows/promote.yml
+    with:
+      bump: minor
+    secrets: inherit
