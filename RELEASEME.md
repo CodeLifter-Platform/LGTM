@@ -1,72 +1,74 @@
 # How to Release LGTM
 
-## TL;DR — release locally, for $0
+LGTM follows the platform versioning contract
+(`Platform-Standards/process/versioning-ci.md`): **`major.minor.patch`, derived from git
+tags**. Nothing is stored in a repo variable, so the recorded version can never drift from
+what was published. `BASE_VERSION` and `RELEASE_LEVEL` are retired; delete them from the
+repo variables if they still exist.
 
-Day-to-day releases happen from a dev Mac, not from CI:
+## The scheme
+
+| Event | Version | GitHub release | README table |
+|---|---|---|---|
+| Pre-release (dispatch on `main`, or `release-local.sh`) | patch + 1, `-pre` | prerelease | **Pre-releases** |
+| **RELEASE MINOR** button (or `release-local.sh minor`) | minor + 1, patch → 0 | full release | **Releases** |
+| **RELEASE MAJOR** button (or `release-local.sh major`) | major + 1, minor → 0, patch → 0 | full release | **Releases** |
+
+Starting from the current `v1.6.0`:
+
+```
+pre-release → 1.6.1-pre    pre-release → 1.6.2-pre
+RELEASE MINOR              → 1.7.0   (rebuilds the 1.6.2-pre commit)
+pre-release → 1.7.1-pre
+RELEASE MAJOR              → 2.0.0
+```
+
+`.github/scripts/next-version.sh` is the one place the arithmetic lives (a copy of the
+platform template). `sort -V` keeps `1.6.9 < 1.6.14`; `fetch-depth: 0` in the workflows is
+what makes the tags visible to a CI checkout.
+
+## One difference from the platform default
+
+On the platform, **merging into `main` publishes the pre-release**. This repo is public, so
+its macOS (10×) and Windows (2×) legs are `workflow_dispatch`-only and a merge builds
+nothing; pushes and PRs run only the ubuntu `version` + `test` jobs. The pre-release is
+therefore cut deliberately, by one of two equivalent routes:
+
+- **`./scripts/release-local.sh`** from a dev Mac: builds, signs, notarizes, inserts the
+  Pre-releases row, commits `chore: release X.Y.Z-pre [skip ci]`, tags the built commit,
+  and publishes a GitHub prerelease with the `.dmg`, `.zip` and `latest-mac.yml`. $0 of
+  Actions minutes. Windows installers are not built this way.
+- **Actions → Build & Release → Run workflow on `main`**: the full pipeline on GitHub
+  runners, producing both macOS and Windows artifacts and the same bookkeeping.
+
+A dispatch on any other branch builds artifacts versioned `X.Y.Z-pre.<run>+<sha>` and
+never releases.
+
+## The two buttons
+
+**RELEASE MINOR** and **RELEASE MAJOR** live under Actions (`release-minor.yml`,
+`release-major.yml`, both calling `promote.yml`). Each one resolves the newest `-pre`
+tag, checks out **that commit**, and reruns the build pipeline with the release version
+compiled in, so `LGTM 1.7.0` reports `1.7.0`. The tag points at the rebuilt commit; the
+Releases README row and its `chore: release` commit land on `main`.
+
+`./scripts/release-local.sh minor` (or `major`) does the same from a Mac, and refuses to
+run unless `main` is sitting on the newest pre-release's commit, for the same reason the
+buttons rebuild that commit: a release must be a tested pre-release, not whatever is on
+`main`.
+
+Only full releases are what `releases/latest` and the auto-updater resolve to:
+pre-releases are marked as such on GitHub, and `electron-updater` ignores them unless the
+app opts in.
+
+## Day-to-day
 
 ```bash
-./scripts/release-local.sh
-```
-
-The script builds, signs (and notarizes when the Apple env vars are exported —
-values in 1Password), inserts the README release-history row, commits
-`chore: release <version> [skip ci]` with the stamped `package.json` /
-`package-lock.json`, tags, pushes, and publishes a GitHub Release with
-generated notes and the `dist/*.dmg`, `dist/*.zip`, and `dist/latest-mac.yml`
-artifacts — exactly the bookkeeping the CI release job produces, without
-spending a single Actions minute.
-
-## Why CI doesn't build on every push anymore
-
-macOS runners bill at **10x** and Windows at **2x**. Routine pushes and PRs
-now run only the cheap ubuntu `version` job. The full pipeline
-(`build-mac` + `build-windows` + `release`) is **dispatch-only**: trigger it
-manually from [Actions → Build & Release](https://github.com/CodeLifterIO/LGTM/actions/workflows/build.yml)
-when you need CI-built artifacts (e.g. the Windows installers, which the
-local script doesn't build). A dispatch on `main` publishes a real release;
-a dispatch on any other branch produces artifact-only prerelease builds.
-
-The iOS workflow (`.github/workflows/ios.yml`) is dispatch-only for the same
-reason — even its simulator build runs on a 10x macOS runner.
-
-## How Versioning Works
-
-| Component | Source | You touch it? |
-|-----------|--------|---------------|
-| **Major.Minor** | GitHub Actions variable `BASE_VERSION` | Only when bumping minor or major |
-| **Patch** | Local script: highest existing `v<BASE>.N` tag + 1. CI: `GITHUB_RUN_NUMBER` | Never |
-| **Suffix** | GitHub Actions variable `RELEASE_LEVEL` (`alpha` / `beta` / `rc`, unset = stable) | Only for prerelease lines |
-
-### Version format
-
-- **Local release / dispatch on main:** `1.6.7` — tag, installers, GitHub Release
-  (with `RELEASE_LEVEL=beta`: `1.6.7-beta`, published as a GitHub *prerelease*)
-- **Push to any branch / PR:** version job only, `1.6.7-pre.7+abc1234`, nothing built
-- **Dispatch on another branch:** `1.6.7-pre.7+abc1234` — builds artifacts, no release
-
-`RELEASE_LEVEL` is a workflow capability only — LGTM ships stable versions, so
-leave the variable unset unless you deliberately start a prerelease line.
-
-### Example version progression on main
-
-```
-1.6.1  →  1.6.2  →  1.6.3  →  ...  →  1.6.50
-                                          ↓
-                             change BASE_VERSION to "1.7"
-                                          ↓
-1.7.51  →  1.7.52  →  1.7.53  →  ...
-```
-
-The patch number never resets. Don't mix local and CI releases within one
-`BASE_VERSION` unless you're sure the CI run counter is behind the tags —
-the two counters are independent.
-
-## Day-to-Day Workflow
-
-```bash
-git push origin my-feature-branch   # → cheap version job only, no paid runners
-# merge PR to main                  # → still no paid runners
-./scripts/release-local.sh          # → v1.6.8 released from your Mac, $0
+git push origin my-feature-branch    # version + tests on ubuntu, no paid runners
+# merge the PR into main             # still no paid runners
+./scripts/release-local.sh           # → v1.6.1-pre from your Mac, $0
+# …a few of those, then:
+./scripts/release-local.sh minor     # → v1.7.0, or press RELEASE MINOR in Actions
 ```
 
 ### Local release prerequisites
@@ -79,124 +81,21 @@ git push origin my-feature-branch   # → cheap version job only, no paid runner
   read `notarytool` keychain profiles, so the profile alone isn't enough. Missing →
   signed-but-unnotarized build, loud warning. The script never fails on this.
 
-## Bumping the Version
-
-When you're ready for a new minor or major:
-
-1. Go to **Settings → Secrets and variables → Actions → Variables** tab
-   (or `gh variable set BASE_VERSION --body "1.7"`)
-2. Edit `BASE_VERSION` (e.g., change `1.6` to `1.7` or `2.0`)
-3. The next release (local or dispatched) picks up the new base
-
-That's the only manual step in the entire release process.
-
-## First-Time Setup
-
-Create the `BASE_VERSION` variable if it doesn't exist yet:
-
-1. Go to repo **Settings → Secrets and variables → Actions**
-2. Click the **Variables** tab
-3. Click **New repository variable**
-4. Name: `BASE_VERSION`, Value: `1.0`
-
-## Manual CI Build (workflow_dispatch)
-
-To run the full CI pipeline — the only way heavy jobs run now:
-
-1. Go to [Actions → Build & Release](https://github.com/CodeLifterIO/LGTM/actions/workflows/build.yml)
-2. Click **Run workflow**
-3. Select the branch — `main` publishes a release; any other branch produces
-   artifact-only prerelease builds
-4. Download artifacts from the workflow run
-
-## What Gets Built
+## What gets built
 
 | Platform | Installer | Portable |
 |----------|-----------|----------|
 | macOS | `LGTM-arm64.dmg` | `LGTM-arm64.zip` |
 | Windows | `LGTM-Setup.exe` (NSIS) | `LGTM-Portable.exe` |
 
-## Code Signing (Optional)
+Asset names are version-less so the `releases/latest/download/…` links in the README
+always resolve to the newest full release.
 
-To sign builds so users don't see Gatekeeper/SmartScreen warnings.
+## Code signing
 
-### macOS — Signing & Notarization with an Apple Developer Account
-
-Since macOS 10.15, distributing a `.dmg` or `.zip` to users outside the App Store requires **both** signing with a Developer ID certificate **and** notarization by Apple. Without both, users see "LGTM is damaged and can't be opened" or "cannot verify developer" warnings.
-
-#### Prerequisites
-
-- A paid **Apple Developer Program** membership ($99/yr): https://developer.apple.com/programs/
-- Access to Xcode or Keychain Access on a Mac to generate and export the certificate
-- Your Team ID (found at https://developer.apple.com/account under Membership)
-
-#### Step 1 — Create a Developer ID Application certificate
-
-1. Sign in at https://developer.apple.com/account/resources/certificates
-2. Click **+** to add a new certificate
-3. Under **Software**, choose **Developer ID Application** (not "Mac App Distribution" — that's for the App Store)
-4. Follow the prompts to upload a CSR generated from Keychain Access (*Keychain Access → Certificate Assistant → Request a Certificate from a Certificate Authority → Saved to disk*)
-5. Download the resulting `.cer` file and double-click it to install into your login keychain
-
-#### Step 2 — Export the certificate as a `.p12`
-
-1. Open **Keychain Access** → **login** keychain → **My Certificates**
-2. Find **Developer ID Application: Your Name (TEAMID)** — it should have a disclosure triangle showing the private key
-3. Right-click → **Export** → choose **Personal Information Exchange (.p12)**
-4. Set a strong password (you'll need it as `CSC_KEY_PASSWORD`)
-
-#### Step 3 — Create an app-specific password for notarization
-
-Notarization uploads your signed build to Apple and gets a stapled ticket back. It authenticates via an app-specific password, *not* your main Apple ID password.
-
-1. Go to https://account.apple.com → **Sign-In and Security** → **App-Specific Passwords**
-2. Generate a new password labelled e.g. `LGTM Notarization`
-3. Copy it immediately — Apple only shows it once
-
-#### Step 4 — Add GitHub Actions secrets
-
-Go to **Settings → Secrets and variables → Actions → Secrets** and add:
-
-| Secret | Value |
-|--------|-------|
-| `CSC_LINK` | base64-encoded contents of the `.p12` file: `base64 -i cert.p12 \| pbcopy` |
-| `CSC_KEY_PASSWORD` | the password you set when exporting the `.p12` |
-| `APPLE_ID` | your Apple ID email (the one that owns the Developer Program seat) |
-| `APPLE_APP_SPECIFIC_PASSWORD` | the app-specific password from Step 3 |
-| `APPLE_TEAM_ID` | your 10-character Team ID from developer.apple.com |
-
-#### Step 5 — Enable signing in the workflow
-
-In `.github/workflows/build.yml`, remove or comment out this line so electron-builder picks up the certificate:
-
-```yaml
-CSC_IDENTITY_AUTO_DISCOVERY: false
-```
-
-And ensure the notarization env vars are passed to the build step:
-
-```yaml
-env:
-  APPLE_ID: ${{ secrets.APPLE_ID }}
-  APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-```
-
-electron-builder auto-detects these and invokes `notarytool` — no extra config needed in `package.json`. The existing `hardenedRuntime: true` and `entitlements` settings in `package.json`'s `build.mac` block are already correct for notarization.
-
-#### Step 6 — Verify
-
-After a successful build, download the DMG and run:
-
-```bash
-codesign -dv --verbose=4 /Applications/LGTM.app
-spctl -a -vvv -t install /Applications/LGTM.app
-```
-
-You should see `Developer ID Application: Your Name` and `source=Notarized Developer ID`.
-
-### Windows
-
-1. Obtain a code-signing certificate (EV or standard) from a CA like DigiCert or Sectigo
-2. Add the same `CSC_LINK` / `CSC_KEY_PASSWORD` secrets (electron-builder uses them for both platforms)
-3. The Windows build step will pick them up automatically
+Sign when the secrets are present, never fail the build when they are absent. macOS
+signing and notarization are documented in
+[`..Documentation/MAC_CODE_SIGNING.md`](..Documentation/MAC_CODE_SIGNING.md); the CI
+secrets are `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID` and the org-level
+`LGTM_APPLE_APP_SPECIFIC_PASSWORD`. Windows has no signing identity yet; the intended route
+is Azure Artifact Signing (`Platform-Standards/process/versioning-ci.md` → Signing).
